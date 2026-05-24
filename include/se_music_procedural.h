@@ -3,15 +3,18 @@
 //  Part of the semver'd public surface (see se_version.h).
 // =====================================================================
 //
-// A seed-driven procedural music generator. The generator's *structure*
-// is fixed -- a six-voice synth (saw bass, square arp, 3-saw pad, sine
-// kick, noise snare, noise hi-hat) on a 4/4, 16th-note grid, in 16-bar
-// sections of eight two-bar chords. Its *content and tone* are data,
-// supplied as a se_music_config_t: the tempo range, the tonic pool, the
-// chord / arp / drum / bass pattern banks, the per-layer gains, and each
-// voice's envelope + filter. So the same generator drives entirely
-// different music (different key, rhythm, harmony, balance, timbre)
-// without code changes -- only the synth topology is shared.
+// A seed-driven procedural music generator. The generator's *arrangement
+// structure* is fixed -- six roles (bass, arp, pad, kick, snare, hi-hat)
+// on a 4/4, 16th-note grid, in 16-bar sections of eight two-bar chords.
+// Everything else is data, supplied as a se_music_config_t: the tempo
+// range, the tonic pool, the chord / arp / drum / bass pattern banks, and
+// a pluggable voice per role. Each role's voice is a se_voice_spec_t (the
+// built-in subtractive/noise synth -- osc + filter + envelope + gain +
+// mods, see se_voice.h), or a game's own se_voice_t for full custom
+// synthesis. So the same generator drives entirely different music --
+// different key, rhythm, harmony, balance, AND timbre -- without code
+// changes; only the arrangement is shared. The same voices feed a future
+// MIDI player.
 //
 // Same seed + same config => identical music. The generator uses a PRNG
 // separate from any world generator, so toggling music never perturbs
@@ -24,6 +27,7 @@
 #pragma once
 
 #include "se_audio_source.h"
+#include "se_voice.h"          // se_voice_spec_t / se_voice_t (per-role voices)
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -61,16 +65,10 @@ typedef struct {
     uint16_t hat;
 } se_music_drum_pattern_t;
 
-// An ADSR envelope shape. Attack / decay / release in seconds; sustain is
-// a 0..1 level.
-typedef struct {
-    float attack, decay, sustain, release;
-} se_music_env_t;
-
-// A biquad filter spec (cutoff/centre in Hz, resonance Q).
-typedef struct {
-    float hz, q;
-} se_music_filter_t;
+// (The ADSR envelope shape and oscillator/filter selection that used to
+// live here are now part of se_voice_spec_t in se_voice.h — each role
+// below carries a full voice spec rather than separate env/filter/gain
+// fields.)
 
 // The musical content + tone the generator plays. Pattern banks are
 // retained BY REFERENCE -- they (and the config itself) must outlive the
@@ -91,21 +89,28 @@ typedef struct {
     se_music_drum_pattern_t  const* drum_patterns;  int drum_pattern_count;
     uint16_t                 const* bass_patterns;  int bass_pattern_count; // 16-bit 16th masks
 
-    // Per-layer master gains (relative to int16 full-scale, before the
-    // mixer's music-gain pass). Keep the sum comfortably under 1.0.
-    float bass_amp, arp_amp, pad_amp, kick_amp, snare_amp, hat_amp;
+    // Per-role voice synthesis. Each spec is the built-in subtractive /
+    // noise voice (osc + filter + ADSR + gain + optional pitch-env / amp-
+    // LFO). The per-role gain that used to be a separate *_amp field now
+    // lives in each spec's .gain — keep their sum comfortably under 1.0,
+    // before the mixer's music-gain pass.
+    se_voice_spec_t bass, arp, pad, kick, snare, hat;
 
-    // Per-voice envelope shapes.
-    se_music_env_t bass_env, arp_env, pad_env, kick_env, snare_env, hat_env;
+    // Optional per-role custom voice. When non-NULL the generator drives
+    // this voice for the role instead of building one from the spec above;
+    // it is caller-owned and must outlive the source. The pad is
+    // polyphonic (a three-note chord = three voices), so it is spec-only —
+    // pad_voice is ignored. NULL = use the spec.
+    se_voice_t* bass_voice;
+    se_voice_t* arp_voice;
+    se_voice_t* kick_voice;
+    se_voice_t* snare_voice;
+    se_voice_t* hat_voice;
 
-    // Per-voice filters: bass/arp/pad lowpass, snare bandpass, hat highpass.
-    se_music_filter_t bass_lpf, arp_lpf, pad_lpf, snare_bpf, hat_hpf;
-
-    // Pad colour: fractional detune of the pad's outer two saws (e.g.
-    // 0.005 = +/-0.5%), and the rate (Hz) of the slow LFO that tilts the
-    // pad's amplitude.
+    // Pad voicing: fractional detune applied to the root and fifth pad
+    // voices (e.g. 0.005 = +/-0.5%) for width. The pad's amplitude LFO is
+    // set per the pad spec's amp_lfo_hz / amp_lfo_depth.
     float pad_detune;
-    float pad_lfo_hz;
 } se_music_config_t;
 
 // The built-in synthwave personality: ~110 BPM minor-key outrun. Returns

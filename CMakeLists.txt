@@ -18,6 +18,7 @@ set(SE_SRCS
     src/rendertext.c       # E1: Hershey vector text (wraps src/internal/hershey*)
     src/audio_dsp.c        # E2: DSP primitives (oscillators, env, biquad)
     src/audio_mixer.c      # E2: software mixer + I2S, group-gated output
+    src/se_voice.c         # E2: pluggable synth voices (built-in subtractive/noise)
     src/music_procedural.c # E2: procedural music source
     src/nbt.c              # E3: NBT serialization primitive
     src/se_save.c          # E3: file-backed save-slot framework

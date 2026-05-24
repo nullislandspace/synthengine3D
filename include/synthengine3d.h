@@ -19,6 +19,7 @@
 #include "se_audio_source.h"    // E2  -- music_source_t / sfx_voice_t contracts
 #include "se_audio_dsp.h"       // E2  -- DSP primitives (osc, env, biquad)
 #include "se_audio.h"           // E2  -- software mixer
+#include "se_voice.h"           // E2  -- pluggable synth voices (built-in + custom)
 #include "se_music_procedural.h"// E2  -- procedural music source
 #include "se_nbt.h"             // E3  -- NBT serialization primitive
 #include "se_save.h"            // E3  -- file-backed save-slot framework

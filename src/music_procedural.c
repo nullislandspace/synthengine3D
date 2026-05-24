@@ -23,6 +23,16 @@ static char const TAG[] = "music_proc";
 #define CHORDS_PER_SECTION SE_MUSIC_CHORDS_PER_SECTION
 #define BARS_PER_SECTION   (CHORDS_PER_SECTION * BARS_PER_CHORD)
 
+// The synthwave kick's fundamental; its pitch envelope sweeps up from
+// here by the kick voice's pitch_env_amt and decays back down.
+#define KICK_BASE_HZ       40.0f
+
+// Sample block between scheduler ticks: voices render in chunks of at most
+// this many samples (one indirect call per voice per chunk). A 16th note
+// is ~3000 samples at these tempos, so chunks are tick-bounded, never
+// crossing a note boundary.
+#define MUSIC_BLOCK        32
+
 // ===============================================================
 // Built-in "synthwave" preset content. This is the data the engine ships;
 // a game can supply its own se_music_config_t to play something else.
@@ -83,6 +93,11 @@ static uint16_t const g_synth_bass[] = {
 // Tonic pool — synthwave-friendly mid-range (A2..G3).
 static int8_t const g_synth_tonics[] = { 45, 47, 48, 50, 52, 53, 55 };
 
+// Per-role voices. Each spec is the built-in subtractive/noise voice.
+// The pad's gain is its layer gain split across the three chord-tone
+// voices (0.14 / 3) so the summed pad matches the old single-block level;
+// the others carry their full layer gain. Sum stays well under 1.0 before
+// the mixer's ~30% music pass.
 static se_music_config_t const g_synthwave_preset = {
     .bpm_min = 100u, .bpm_span = 19u,              // 100..118 BPM
     .tonics = g_synth_tonics, .tonic_count = ARRAY_LEN(g_synth_tonics),
@@ -90,23 +105,23 @@ static se_music_config_t const g_synthwave_preset = {
     .arp_patterns  = g_synth_arps,         .arp_pattern_count  = ARRAY_LEN(g_synth_arps),
     .drum_patterns = g_synth_drums,        .drum_pattern_count = ARRAY_LEN(g_synth_drums),
     .bass_patterns = g_synth_bass,         .bass_pattern_count = ARRAY_LEN(g_synth_bass),
-    // Layer gains (sum well under 1.0 before the mixer's ~30% music pass).
-    .bass_amp = 0.30f, .arp_amp = 0.16f, .pad_amp = 0.14f,
-    .kick_amp = 0.45f, .snare_amp = 0.32f, .hat_amp = 0.10f,
-    // Voice envelopes (attack, decay, sustain, release).
-    .bass_env  = { 0.005f, 0.18f, 0.5f, 0.06f },
-    .arp_env   = { 0.002f, 0.08f, 0.0f, 0.04f },
-    .pad_env   = { 0.40f,  0.30f, 0.7f, 1.20f },
-    .kick_env  = { 0.001f, 0.08f, 0.0f, 0.001f },
-    .snare_env = { 0.001f, 0.08f, 0.0f, 0.001f },
-    .hat_env   = { 0.001f, 0.03f, 0.0f, 0.001f },
-    // Voice filters: bass dark, arp bright, pad warm; snare bandpass, hat highpass.
-    .bass_lpf  = { 600.0f,  0.9f },
-    .arp_lpf   = { 2400.0f, 0.7f },
-    .pad_lpf   = { 1200.0f, 0.7f },
-    .snare_bpf = { 1800.0f, 0.9f },
-    .hat_hpf   = { 7000.0f, 0.8f },
-    .pad_detune = 0.005f, .pad_lfo_hz = 0.4f,
+    // Bass: dark saw. Arp: bright square. Pad: warm saw with a slow amp LFO.
+    .bass  = { .osc = SE_OSC_SAW,    .osc_count = 1, .env = { 0.005f, 0.18f, 0.5f, 0.06f },
+               .filter = SE_FILTER_LPF, .cutoff_hz = 600.0f,  .q = 0.9f, .gain = 0.30f },
+    .arp   = { .osc = SE_OSC_SQUARE, .osc_count = 1, .env = { 0.002f, 0.08f, 0.0f, 0.04f },
+               .filter = SE_FILTER_LPF, .cutoff_hz = 2400.0f, .q = 0.7f, .gain = 0.16f },
+    .pad   = { .osc = SE_OSC_SAW,    .osc_count = 1, .env = { 0.40f, 0.30f, 0.7f, 1.20f },
+               .filter = SE_FILTER_LPF, .cutoff_hz = 1200.0f, .q = 0.7f, .gain = 0.14f / 3.0f,
+               .amp_lfo_hz = 0.4f, .amp_lfo_depth = 0.2f },
+    // Kick: sine with a fast pitch drop (40 Hz + 60 Hz * env). No filter.
+    .kick  = { .osc = SE_OSC_SINE,   .osc_count = 1, .env = { 0.001f, 0.08f, 0.0f, 0.001f },
+               .filter = SE_FILTER_NONE, .gain = 0.45f, .pitch_env_amt = 60.0f },
+    // Snare: bandpassed noise. Hat: highpassed noise.
+    .snare = { .osc = SE_OSC_NOISE,  .osc_count = 1, .env = { 0.001f, 0.08f, 0.0f, 0.001f },
+               .filter = SE_FILTER_BPF, .cutoff_hz = 1800.0f, .q = 0.9f, .gain = 0.32f },
+    .hat   = { .osc = SE_OSC_NOISE,  .osc_count = 1, .env = { 0.001f, 0.03f, 0.0f, 0.001f },
+               .filter = SE_FILTER_HPF, .cutoff_hz = 7000.0f, .q = 0.8f, .gain = 0.10f },
+    .pad_detune = 0.005f,
 };
 
 se_music_config_t const* se_music_synthwave_preset(void) {
@@ -170,7 +185,7 @@ typedef struct {
     // Current section's progression + selected pattern set.
     se_music_progression_t  prog;
     se_music_drum_pattern_t drums;
-    se_music_arp_pattern_t  arp;            // this section's arp pattern
+    se_music_arp_pattern_t  arp_pat;        // this section's arp pattern
     uint8_t        arp_index;      // its index in the arp bank (no-repeat)
     int            arp_octave;     // 0 or +12 — per-section arp transpose
     uint16_t       bass_mask;      // this section's bass rhythm
@@ -178,40 +193,20 @@ typedef struct {
     bool           layer_arp;
     bool           layer_pad;
     bool           layer_drums;
-
-    // Bass voice.
-    uint32_t       bass_phase;
-    audio_env_t    bass_env;
-    audio_biquad_t bass_lpf;
-    float          bass_freq;
-
-    // Arp voice.
-    uint32_t       arp_phase;
-    audio_env_t    arp_env;
-    audio_biquad_t arp_lpf;
-    float          arp_freq;
-
-    // Pad voice — two detuned saws.
-    uint32_t       pad_phase_a;
-    uint32_t       pad_phase_b;
-    uint32_t       pad_phase_c;   // fifth on top
-    audio_env_t    pad_env;
-    audio_biquad_t pad_lpf;
-    float          pad_freq_a;
-    float          pad_freq_b;
-    float          pad_freq_c;
-    uint32_t       pad_lfo_phase;
     int8_t         pad_last_chord_index;
 
-    // Drums.
-    uint32_t       kick_phase;
-    audio_env_t    kick_env;
-    uint32_t       snare_noise;
-    audio_env_t    snare_env;
-    audio_biquad_t snare_bpf;
-    uint32_t       hat_noise;
-    audio_env_t    hat_env;
-    audio_biquad_t hat_hpf;
+    // Built-in voices, used for any role the config doesn't override. The
+    // pad is polyphonic: three voices for the chord's root / third / fifth.
+    se_voice_synth_t v_bass, v_arp, v_pad[3], v_kick, v_snare, v_hat;
+
+    // The voice actually played for each role — a built-in above or a
+    // config-supplied custom se_voice_t. Set once at create.
+    se_voice_t* bass;
+    se_voice_t* arp;
+    se_voice_t* pad[3];
+    se_voice_t* kick;
+    se_voice_t* snare;
+    se_voice_t* hat;
 } music_proc_t;
 
 // ---------------------------------------------------------------
@@ -244,7 +239,7 @@ static void start_new_section(music_proc_t* m) {
             idx = (uint8_t)prng_range(&m->prng, (uint32_t)cfg->arp_pattern_count);
         }
         m->arp_index = idx;
-        m->arp       = cfg->arp_patterns[idx];
+        m->arp_pat   = cfg->arp_patterns[idx];
     }
     m->arp_octave = ((prng_next(&m->prng) % 3u) == 0u) ? 12 : 0;
 
@@ -290,8 +285,7 @@ static void on_tick(music_proc_t* m) {
             bool const walk = (m->tick_in_bar == TICKS_PER_BAR - 1)
                            && ((prng_next(&m->prng) & 3u) == 0u);
             int const bass_midi = (walk ? tones[2] : tones[0]) - 12;
-            m->bass_freq = midi_to_hz(bass_midi);
-            audio_env_trigger(&m->bass_env);
+            m->bass->note_on(m->bass, midi_to_hz(bass_midi), 1.0f);
         }
     }
 
@@ -299,7 +293,7 @@ static void on_tick(music_proc_t* m) {
     // rest (no trigger); the rest are chord tones lifted into
     // octaves, optionally transposed up an octave for the section.
     if (m->layer_arp) {
-        int const step = m->arp.step[m->tick_in_bar];
+        int const step = m->arp_pat.step[m->tick_in_bar];
         if (step >= 0) {
             int midi;
             switch (step) {
@@ -310,35 +304,28 @@ static void on_tick(music_proc_t* m) {
                 case 4:  midi = tones[1] + 12; break;
                 default: midi = tones[2] + 12; break;
             }
-            m->arp_freq = midi_to_hz(midi + m->arp_octave);
-            audio_env_trigger(&m->arp_env);
+            m->arp->note_on(m->arp, midi_to_hz(midi + m->arp_octave), 1.0f);
         }
     }
 
-    // Pad: retrigger on chord changes only.
+    // Pad: retrigger on chord changes only. Three voices play the chord's
+    // root / third / fifth; the outer two are detuned for width.
     int8_t const chord_index = (int8_t)((m->bar_in_section / BARS_PER_CHORD) % CHORDS_PER_SECTION);
     if (m->layer_pad && chord_index != m->pad_last_chord_index) {
-        // Three voices: root, third, fifth, all in the mid-octave.
-        m->pad_freq_a = midi_to_hz(tones[0]);
-        m->pad_freq_b = midi_to_hz(tones[1]);
-        m->pad_freq_c = midi_to_hz(tones[2]);
-        audio_env_trigger(&m->pad_env);
+        float const det = m->cfg->pad_detune;
+        m->pad[0]->note_on(m->pad[0], midi_to_hz(tones[0]) * (1.0f - det), 1.0f);
+        m->pad[1]->note_on(m->pad[1], midi_to_hz(tones[1]),                1.0f);
+        m->pad[2]->note_on(m->pad[2], midi_to_hz(tones[2]) * (1.0f + det), 1.0f);
         m->pad_last_chord_index = chord_index;
     }
 
-    // Drums.
+    // Drums. The kick's pitch comes from its voice (KICK_BASE_HZ + its
+    // pitch envelope); snare / hat are noise, so their pitch is ignored.
     if (m->layer_drums) {
         uint16_t const bit = (uint16_t)(1u << m->tick_in_bar);
-        if (m->drums.kick & bit) {
-            audio_env_trigger(&m->kick_env);
-            m->kick_phase = 0;
-        }
-        if (m->drums.snare & bit) {
-            audio_env_trigger(&m->snare_env);
-        }
-        if (m->drums.hat & bit) {
-            audio_env_trigger(&m->hat_env);
-        }
+        if (m->drums.kick  & bit) m->kick->note_on(m->kick,   KICK_BASE_HZ, 1.0f);
+        if (m->drums.snare & bit) m->snare->note_on(m->snare, 0.0f,         1.0f);
+        if (m->drums.hat   & bit) m->hat->note_on(m->hat,     0.0f,         1.0f);
     }
 
     // Advance bar / section counters.
@@ -357,96 +344,57 @@ static void on_tick(music_proc_t* m) {
 // Render
 // ---------------------------------------------------------------
 
-static float render_sample(music_proc_t* m) {
-    se_music_config_t const* cfg = m->cfg;
-    float out = 0.0f;
-
-    // Bass — saw through lowpass.
-    {
-        uint32_t const inc = audio_dsp_phase_inc(m->bass_freq);
-        float const e = audio_env_tick(&m->bass_env);
-        float       s = audio_dsp_saw(m->bass_phase);
-        s = audio_biquad_tick(&m->bass_lpf, s);
-        m->bass_phase += inc;
-        out += s * e * cfg->bass_amp;
-    }
-
-    // Arp — square through lowpass.
-    {
-        uint32_t const inc = audio_dsp_phase_inc(m->arp_freq);
-        float const e = audio_env_tick(&m->arp_env);
-        float       s = audio_dsp_square(m->arp_phase);
-        s = audio_biquad_tick(&m->arp_lpf, s);
-        m->arp_phase += inc;
-        out += s * e * cfg->arp_amp;
-    }
-
-    // Pad — three slightly-detuned saws (root + third + fifth)
-    // through a lowpass whose amplitude tilts on a slow LFO.
-    {
-        float const det = cfg->pad_detune;
-        uint32_t const inc_a = audio_dsp_phase_inc(m->pad_freq_a * (1.0f - det));
-        uint32_t const inc_b = audio_dsp_phase_inc(m->pad_freq_b);
-        uint32_t const inc_c = audio_dsp_phase_inc(m->pad_freq_c * (1.0f + det));
-        float const e   = audio_env_tick(&m->pad_env);
-        float const lfo = audio_dsp_sin(m->pad_lfo_phase);
-        float       s   = (audio_dsp_saw(m->pad_phase_a)
-                        + audio_dsp_saw(m->pad_phase_b)
-                        + audio_dsp_saw(m->pad_phase_c)) * (1.0f / 3.0f);
-        s = audio_biquad_tick(&m->pad_lpf, s);
-        s *= (0.8f + 0.2f * lfo);
-        m->pad_phase_a += inc_a;
-        m->pad_phase_b += inc_b;
-        m->pad_phase_c += inc_c;
-        m->pad_lfo_phase += audio_dsp_phase_inc(cfg->pad_lfo_hz);
-        out += s * e * cfg->pad_amp;
-    }
-
-    // Kick — sine with a fast pitch drop synthesised from the envelope.
-    {
-        float const e = audio_env_tick(&m->kick_env);
-        float const f = 40.0f + e * 60.0f;
-        uint32_t const inc = audio_dsp_phase_inc(f);
-        float s = audio_dsp_sin(m->kick_phase);
-        m->kick_phase += inc;
-        out += s * e * cfg->kick_amp;
-    }
-
-    // Snare — bandpassed noise.
-    {
-        float const e = audio_env_tick(&m->snare_env);
-        float n = audio_dsp_noise(&m->snare_noise);
-        n = audio_biquad_tick(&m->snare_bpf, n);
-        out += n * e * cfg->snare_amp;
-    }
-
-    // Hi-hat — highpassed noise.
-    {
-        float const e = audio_env_tick(&m->hat_env);
-        float n = audio_dsp_noise(&m->hat_noise);
-        n = audio_biquad_tick(&m->hat_hpf, n);
-        out += n * e * cfg->hat_amp;
-    }
-
-    return out;
+// Add one voice's output into the mono accumulator, skipping it when it
+// is silent (envelope idle) so a quiet layer costs nothing.
+static inline void mix_voice(se_voice_t* v, float* accum, size_t n) {
+    if (v->active && !v->active(v)) return;
+    v->render(v, accum, n);
 }
 
 static void music_render(music_source_t* self, int16_t* out, size_t frames) {
     music_proc_t* m = (music_proc_t*)self;
 
-    for (size_t i = 0; i < frames; i++) {
-        // Tick scheduler.
+    size_t done = 0;
+    while (done < frames) {
+        // Fire any 16th-note tick that is due, then continue (so several
+        // due ticks — never the case at these tempos — would all fire).
         if (m->sample_pos >= m->next_tick_at) {
             on_tick(m);
             m->next_tick_at += m->samples_per_16th;
+            continue;
         }
 
-        float const s = render_sample(m);
-        int16_t const sample = audio_dsp_to_s16(s);
-        out[2 * i + 0] = sample;
-        out[2 * i + 1] = sample;
+        // Render up to the next tick, bounded by the scratch block and the
+        // frames remaining. `until` is fractional; flooring it keeps ticks
+        // firing on the same integer sample they did sample-by-sample.
+        double const until = m->next_tick_at - m->sample_pos;
+        size_t n = frames - done;
+        if ((double)n > until) {
+            size_t const u = (size_t)until;
+            n = (u < 1) ? 1 : u;
+        }
+        if (n > MUSIC_BLOCK) n = MUSIC_BLOCK;
 
-        m->sample_pos += 1.0;
+        float accum[MUSIC_BLOCK];
+        for (size_t k = 0; k < n; k++) accum[k] = 0.0f;
+
+        mix_voice(m->bass,   accum, n);
+        mix_voice(m->arp,    accum, n);
+        mix_voice(m->pad[0], accum, n);
+        mix_voice(m->pad[1], accum, n);
+        mix_voice(m->pad[2], accum, n);
+        mix_voice(m->kick,   accum, n);
+        mix_voice(m->snare,  accum, n);
+        mix_voice(m->hat,    accum, n);
+
+        for (size_t k = 0; k < n; k++) {
+            int16_t const sample = audio_dsp_to_s16(accum[k]);
+            out[2 * (done + k) + 0] = sample;
+            out[2 * (done + k) + 1] = sample;
+        }
+
+        m->sample_pos += (double)n;
+        done          += n;
     }
 }
 
@@ -469,6 +417,22 @@ static uint32_t hash32(uint32_t x, char const* tag) {
     h ^= h >> 16;
     if (h == 0) h = 1;
     return h;
+}
+
+// Re-initialise the built-in voices from their specs — a full reset that
+// silences voice tails. Custom (config-supplied) voices are caller-owned
+// and left untouched. Role pointers, set once in create, stay valid (the
+// embedded structs are reset in place).
+static void reinit_builtin_voices(music_proc_t* m) {
+    se_music_config_t const* cfg = m->cfg;
+    se_voice_synth_init(&m->v_bass,    &cfg->bass);
+    se_voice_synth_init(&m->v_arp,     &cfg->arp);
+    se_voice_synth_init(&m->v_pad[0],  &cfg->pad);
+    se_voice_synth_init(&m->v_pad[1],  &cfg->pad);
+    se_voice_synth_init(&m->v_pad[2],  &cfg->pad);
+    se_voice_synth_init(&m->v_kick,    &cfg->kick);
+    se_voice_synth_init(&m->v_snare,   &cfg->snare);
+    se_voice_synth_init(&m->v_hat,     &cfg->hat);
 }
 
 static void music_reseed(music_proc_t* m, uint32_t seed) {
@@ -507,19 +471,8 @@ static void music_reseed(music_proc_t* m, uint32_t seed) {
     m->bar_in_section= 0;
     m->pad_last_chord_index = -1;
 
-    // Reset all envelopes so a fresh seed doesn't leak the old
-    // run's voice tails.
-    audio_env_reset(&m->bass_env);
-    audio_env_reset(&m->arp_env);
-    audio_env_reset(&m->pad_env);
-    audio_env_reset(&m->kick_env);
-    audio_env_reset(&m->snare_env);
-    audio_env_reset(&m->hat_env);
-    audio_biquad_reset(&m->bass_lpf);
-    audio_biquad_reset(&m->arp_lpf);
-    audio_biquad_reset(&m->pad_lpf);
-    audio_biquad_reset(&m->snare_bpf);
-    audio_biquad_reset(&m->hat_hpf);
+    // Reset the voices so a fresh seed doesn't leak the old run's tails.
+    reinit_builtin_voices(m);
 }
 
 static void music_on_seed(music_source_t* self, uint32_t seed) {
@@ -558,19 +511,18 @@ music_source_t* music_procedural_create(se_music_config_t const* cfg, uint32_t s
     m->base.on_seed  = music_on_seed;
     m->base.shutdown = music_shutdown;
 
-    // Envelope shapes + filters for each voice come from the config.
-    audio_env_configure(&m->bass_env,  cfg->bass_env.attack,  cfg->bass_env.decay,  cfg->bass_env.sustain,  cfg->bass_env.release);
-    audio_env_configure(&m->arp_env,   cfg->arp_env.attack,   cfg->arp_env.decay,   cfg->arp_env.sustain,   cfg->arp_env.release);
-    audio_env_configure(&m->pad_env,   cfg->pad_env.attack,   cfg->pad_env.decay,   cfg->pad_env.sustain,   cfg->pad_env.release);
-    audio_env_configure(&m->kick_env,  cfg->kick_env.attack,  cfg->kick_env.decay,  cfg->kick_env.sustain,  cfg->kick_env.release);
-    audio_env_configure(&m->snare_env, cfg->snare_env.attack, cfg->snare_env.decay, cfg->snare_env.sustain, cfg->snare_env.release);
-    audio_env_configure(&m->hat_env,   cfg->hat_env.attack,   cfg->hat_env.decay,   cfg->hat_env.sustain,   cfg->hat_env.release);
-
-    audio_biquad_lpf(&m->bass_lpf,  cfg->bass_lpf.hz,  cfg->bass_lpf.q);
-    audio_biquad_lpf(&m->arp_lpf,   cfg->arp_lpf.hz,   cfg->arp_lpf.q);
-    audio_biquad_lpf(&m->pad_lpf,   cfg->pad_lpf.hz,   cfg->pad_lpf.q);
-    audio_biquad_bpf(&m->snare_bpf, cfg->snare_bpf.hz, cfg->snare_bpf.q);
-    audio_biquad_hpf(&m->hat_hpf,   cfg->hat_hpf.hz,   cfg->hat_hpf.q);
+    // Build the built-in voices from the per-role specs, then route each
+    // role to its custom override (if any) or its built-in. The pad is
+    // polyphonic, so it always uses its three built-in voices.
+    reinit_builtin_voices(m);
+    m->bass   = cfg->bass_voice  ? cfg->bass_voice  : &m->v_bass.base;
+    m->arp    = cfg->arp_voice   ? cfg->arp_voice   : &m->v_arp.base;
+    m->pad[0] = &m->v_pad[0].base;
+    m->pad[1] = &m->v_pad[1].base;
+    m->pad[2] = &m->v_pad[2].base;
+    m->kick   = cfg->kick_voice  ? cfg->kick_voice  : &m->v_kick.base;
+    m->snare  = cfg->snare_voice ? cfg->snare_voice : &m->v_snare.base;
+    m->hat    = cfg->hat_voice   ? cfg->hat_voice   : &m->v_hat.base;
 
     music_reseed(m, seed);
 

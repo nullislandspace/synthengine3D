@@ -25,6 +25,35 @@ not yet frozen — minor releases may still adjust the API as it settles toward
   that reads `cam.x` / `cam.y` is source-compatible; the struct layout grew,
   hence a (pre-1.0) breaking bump. At zero `z` / orientation the projection
   is **byte-for-byte identical** to the old fixed pinhole.
+- **`se_music_config_t` now carries a pluggable voice per role.** The separate
+  per-voice `*_amp` gains, `*_env` (`se_music_env_t`) and `*_lpf`/`*_bpf`/`*_hpf`
+  (`se_music_filter_t`) fields are replaced by one `se_voice_spec_t` per role
+  (`bass`, `arp`, `pad`, `kick`, `snare`, `hat`) — gain/env/filter now live in
+  the spec — plus optional per-role `*_voice` overrides and `pad_detune`
+  (`pad_lfo_hz` moved into the pad spec's `amp_lfo_hz`). `se_music_env_t` /
+  `se_music_filter_t` are removed (superseded by `se_env_t` and the spec).
+  Games that only use `music_procedural_create(NULL, …)` (the preset) are
+  unaffected. The synthwave sound is preserved.
+
+### Added — `se_voice.h` (pluggable synth voices)
+- **`se_voice_t`** — the voice interface (vtable): `note_on(freq, velocity)` /
+  `note_off()` / `render(mix, frames)` (adds into a mono accumulator) /
+  `active()`. One voice = one note; chords/polyphony are multiple voices. This
+  is the unit the procedural sequencer triggers and the unit a **future MIDI
+  player** will allocate per note — a game can also implement it for fully
+  custom synthesis.
+- **`se_voice_synth_t` + `se_voice_synth_init()`** — a built-in, embeddable
+  (no-heap) subtractive/noise voice driven by **`se_voice_spec_t`**: oscillator
+  (`se_osc_kind_t`: sine/saw/square/triangle/noise) ×1..`SE_VOICE_MAX_OSC`
+  detuned → optional filter (`se_filter_kind_t`) → ADSR (`se_env_t`) → gain,
+  with optional pitch-envelope and amplitude-LFO modulation. Covers the whole
+  synthwave palette and is what the per-role specs build.
+
+### Changed (internal)
+- The procedural generator's six hardcoded voices became `se_voice_t`s driven
+  through the note-on/off interface (the pad is now three voices — a chord —
+  rather than one three-oscillator block; sonically equivalent by filter
+  linearity, with the pad gain split across the three).
 
 ### Added
 - **`render_set_camera_6dof(x, y, z, yaw, pitch, roll)`** — position the eye
