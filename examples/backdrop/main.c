@@ -7,9 +7,10 @@
 //  backdrop slot -- so the CPU is free for the 3D scene in on_render.
 //
 //  It shows the whole se_ppa shape: bring the compositor up, build PSRAM
-//  layer caches once, and per frame submit FILL/BLIT/BLEND non-blocking,
-//  serialising the overlapping ops with se_ppa_wait_one() (PPA does not
-//  order ops across client types, so overlapping writes need a barrier).
+//  layer caches once, and per frame ENQUEUE FILL/BLIT/BLEND with job ids.
+//  The engine pump runs them in submission order (so the overlapping sky →
+//  sun → hills compose correctly with no caller barriers); we just
+//  se_ppa_wait_job() the last one before the foreground draws.
 //
 //  Illustrative, not part of this game's build. ESP32-P4 only (PPA).
 // =====================================================================
@@ -79,22 +80,24 @@ static void on_update(float dt, void* user) {
     s_t += dt;
 }
 
-// The backdrop hook: composite sky -> sun -> hills on the PPA. Each op is a
-// non-blocking submit; the wait_one() barriers pin the order because all
-// three touch the same upper region on different client types.
+// The backdrop hook: composite sky -> sun -> hills on the PPA. Each call is a
+// non-blocking ENQUEUE tagged with a job id; the engine pump runs them in
+// submission order (so sky, then sun over it, then hills over that — no
+// caller-managed barriers). We wait once at the end for the last job, which
+// also means the whole backdrop is down before on_render draws over it.
 static void on_backdrop(pax_buf_t* fb, void* user) {
     (void)user;
+    enum { J_SKY = 0, J_SUN, J_HILLS };
 
-    se_ppa_fill(fb, SKY_TOP, SKY_H, SKY_ARGB);
-    se_ppa_wait_one();
+    se_ppa_fill(fb, J_SKY, SKY_TOP, SKY_H, SKY_ARGB);
 
     // Slide the sun vertically (a setting-sun bob): top y in [40, 120].
     int const sun_y = 80 + (int)(40.0f * sinf(s_t));
-    se_ppa_blit(fb, &s_sun, sun_y);
-    se_ppa_wait_one();
+    se_ppa_blit(fb, J_SUN, &s_sun, sun_y);
 
-    se_ppa_blend_key(fb, &s_hills, HILLS_TOP, HILLS_CK_LO, HILLS_CK_HI);
-    se_ppa_wait_one();   // backdrop must be in place before on_render draws
+    se_ppa_blend_key(fb, J_HILLS, &s_hills, HILLS_TOP, HILLS_CK_LO, HILLS_CK_HI);
+
+    se_ppa_wait_job(J_HILLS);   // backdrop fully down before on_render draws
 }
 
 static void on_render(pax_buf_t* fb, void* user) {

@@ -18,21 +18,22 @@ It composites three layers every frame with zero CPU pixel work:
   each layer (matching the framebuffer's format/orientation from
   `se_display_info()`), draw artwork into `layer.buf` with normal PAX calls,
   and `se_ppa_layer_flush()` so the PPA's DMA sees finished pixels.
-- **Per frame** (`on_backdrop`): three non-blocking submits, each followed by
-  `se_ppa_wait_one()`. The barriers matter — PPA does **not** guarantee
-  execution order across different client types, and all three ops write the
-  same upper region, so without the waits the sun could land on top of the
-  hills. Ops that touch **independent** regions don't need the barriers: fire
-  them as a batch and drain once with `se_ppa_wait_all()`.
+- **Per frame** (`on_backdrop`): three non-blocking enqueues, each tagged with
+  a job id (`J_SKY`, `J_SUN`, `J_HILLS`), then a single `se_ppa_wait_job(J_HILLS)`
+  at the end. No caller-managed barriers: the engine pump runs jobs in
+  submission order, so even though all three write the same upper region, sky →
+  sun → hills compose correctly. Waiting for the last job also guarantees the
+  backdrop is fully down before `on_render` draws over it. (To overlap CPU work,
+  enqueue the batch, do the CPU work, *then* `se_ppa_wait_job()`.)
 - **Logical vs raw** (`logical_dims`): the framebuffer is stored raw
   (pre-orientation); a quarter-turn transposes width/height. The helper derives
   logical dimensions from `se_display_info()` so the layers match the screen.
 
 ## Notes
 
-- Submits return `bool`: `false` means refused (in-flight cap reached, driver
-  busy, or an out-of-range band) — nothing was queued. Drain with
-  `se_ppa_wait_one()` and retry. This example stays well under the cap.
+- Submits return `bool`: `false` means refused (submit queue full at
+  `SE_PPA_QUEUE_DEPTH`, or an out-of-range band) — nothing was queued, and you
+  shouldn't `se_ppa_wait_job()` that id. This example stays well under the cap.
 - Layer caches are flushed **once** (they never change). The framebuffer needs
   no per-frame cache op here: during the backdrop phase its upper region is
   written only by the PPA (DMA), never the CPU. See

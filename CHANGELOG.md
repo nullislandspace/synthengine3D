@@ -49,25 +49,39 @@ not yet frozen — minor releases may still adjust the API as it settles toward
   with optional pitch-envelope and amplitude-LFO modulation. Covers the whole
   synthwave palette and is what the per-role specs build.
 
+### Added — `se_ppa_blit_rect()` (PPA sprite blit)
+- **`se_ppa_blit_rect(fb, job_id, layer, src_x, src_y, w, h, dst_x, dst_y)`** — a 1:1
+  blit of an arbitrary `w×h` logical sub-rectangle of a layer to `(dst_x,dst_y)`,
+  generalising the full-width-band `se_ppa_blit`. Lets a layer be sized to its
+  artwork's bounding box (less SRM read/write, smaller cache) and lets callers
+  clip a sprite to the screen/horizon by trimming `w`/`h` (non-positive = no-op
+  success). The orientation transform (`band_to_raw`) was generalised to a
+  logical rect (`rect_to_raw`). `se_ppa_blit` is unchanged.
+
 ### Added — `se_ppa.h` (ESP32-P4 PPA blit helper)
 - **A generic PPA (Pixel-Processing-Accelerator) compositor** for offloading 2D
   blit work — backdrops, sprite layers, band fills — off the CPU. It owns the
   driver mechanics every app re-writes: the FILL / SRM / BLEND client lifecycle,
-  an async **completion latch** (a counting semaphore — submit many
-  non-blocking, then `se_ppa_wait_all()`), the **logical→raw orientation maths**
-  (callers think in logical screen bands; the engine maps them to raw PPA
+  an **ordered job queue driven by a pump task** (submits are non-blocking
+  *enqueues* tagged with a caller `job_id`; a dedicated task submits them to the
+  hardware one at a time in submission order, so execution order across op types
+  is guaranteed with no cross-client races and no caller-managed waits — and the
+  unsafe ISR-context submit is avoided, since the pump runs in task context),
+  the **logical→raw orientation maths** (logical screen bands/rects → raw PPA
   picture-blocks — `PAX_O_UPRIGHT` + `PAX_O_ROT_CW` verified), and cache-line-
   aligned **PSRAM layer caches** with the one-shot C2M flush PPA's DMA needs.
 - **API:** `se_ppa_init` · `se_ppa_layer_alloc` / `_flush` / `_free` ·
-  `se_ppa_fill` / `_blit` / `_blend_key` (non-blocking submits returning a
-  meaningful `bool` — `false` = refused, latch never desyncs) · `se_ppa_wait_one`
-  / `_wait_all` / `_pending`. New `se_ppa_layer_t`. Knobs in `se_config.h`:
-  `SE_PPA_MAX_PENDING`, `SE_PPA_CLIENT_QUEUE_DEPTH`, `SE_PPA_CACHE_LINE`.
-- **What stays with the caller:** the artwork, the band layout, and the submit
-  *choreography* (ordering + waits) — PPA does not order ops across client
-  types, so overlapping writes are the caller's barrier. ESP32-P4 only (the IDF
-  component now `REQUIRES … esp_driver_ppa esp_mm`); degrades to a logged no-op
-  if init fails. Docs: `docs/ppa.md` + `examples/backdrop/`.
+  `se_ppa_fill` / `_blit` / `_blit_rect` / `_blend_key` (non-blocking enqueues,
+  each taking `job_id` as the 2nd arg, returning `bool` — `false` = refused) ·
+  `se_ppa_wait_job` (drain to a job id) / `_wait_all` / `_pending`. New
+  `se_ppa_layer_t`. Knobs in `se_config.h`: `SE_PPA_QUEUE_DEPTH`,
+  `SE_PPA_CLIENT_QUEUE_DEPTH`, `SE_PPA_PUMP_TASK_PRIO` / `_STACK` / `_CORE`,
+  `SE_PPA_CACHE_LINE`.
+- **What stays with the caller:** the artwork, the band layout, and which CPU
+  work overlaps the hardware (enqueue a batch, do CPU work, `se_ppa_wait_job`
+  the id you need). Ordering is the engine's. ESP32-P4 only (the IDF component
+  `REQUIRES … esp_driver_ppa esp_mm`); degrades to a logged no-op if init fails.
+  Docs: `docs/ppa.md` + `examples/backdrop/`.
 
 ### Changed (internal)
 - The procedural generator's six hardcoded voices became `se_voice_t`s driven

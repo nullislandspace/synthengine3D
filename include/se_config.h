@@ -135,19 +135,35 @@
 // registration once), so they are compile-time #defines per the
 // performance contract.
 
-// In-flight op cap. Sizes BOTH the counting completion semaphore AND the
-// submit guard from one value, so they can never drift: a submit past the
-// cap is refused (returns false) rather than over-running the semaphore.
-// Raise it for an app that batches many independent async blits.
-#ifndef SE_PPA_MAX_PENDING
-#define SE_PPA_MAX_PENDING  8
+// Depth of the pump's submit + done queues — i.e. the most PPA jobs that may
+// be submitted (un-drained) at once. A submit past it is refused (returns
+// false), never silently dropped. Sizes both queues identically so a frame's
+// completions always have room. Raise it for an app that batches many jobs
+// per frame before waiting.
+#ifndef SE_PPA_QUEUE_DEPTH
+#define SE_PPA_QUEUE_DEPTH  16
 #endif
 
-// Per-client queue depth (PPA `max_pending_trans_num`): how many ops of one
-// type may be queued before the first completes. 1 matches the serialised
-// backdrop pattern; raise it for a client that pipelines same-type ops.
+// Per-client queue depth (PPA `max_pending_trans_num`). The pump submits one
+// op at a time (it waits for each completion before the next), so a client
+// never holds more than one — 1 is sufficient and correct. Only raise it if
+// you bypass the pump to pipeline same-type ops yourself.
 #ifndef SE_PPA_CLIENT_QUEUE_DEPTH
 #define SE_PPA_CLIENT_QUEUE_DEPTH  1
+#endif
+
+// PPA pump task (owns all hardware submission, so ppa_do_* run in task
+// context, never an ISR). Pinned off the render core by default, just under
+// the audio mixer's priority so a submit can never starve audio. Stack is in
+// words (FreeRTOS units).
+#ifndef SE_PPA_PUMP_TASK_PRIO
+#define SE_PPA_PUMP_TASK_PRIO   (configMAX_PRIORITIES - 3)
+#endif
+#ifndef SE_PPA_PUMP_TASK_STACK
+#define SE_PPA_PUMP_TASK_STACK  4096
+#endif
+#ifndef SE_PPA_PUMP_TASK_CORE
+#define SE_PPA_PUMP_TASK_CORE   1
 #endif
 
 // PSRAM cache-line size (bytes) for layer-cache aligned allocation and the
