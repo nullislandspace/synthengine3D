@@ -90,6 +90,12 @@ not yet frozen — minor releases may still adjust the API as it settles toward
     overdraw, measure under light overdraw.
   Back-face culling is intentionally NOT an engine pass — it belongs in the
   game's objects, which know their face normals (e.g. `emit_cube`).
+- **`scene_prepare()` / `scene_rasterize()`** — the two halves of
+  `scene_render()`, split so a game can overlap the geometry-only work
+  (cull + order, no framebuffer access) with concurrent framebuffer activity
+  such as a PPA backdrop blit, then rasterize once that completes.
+  `scene_render()` is unchanged (it now calls the two in sequence); the output
+  is identical.
 
 ### Resolved
 - The ER first cut's no-op cull/order seams are now real, opt-in passes; the

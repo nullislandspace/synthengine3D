@@ -87,6 +87,25 @@ void scene_render(se_render_mode_t mode);
 // Back-compat alias for scene_render(SE_RENDER_ZBUFFER).
 void scene_flush(void);
 
+// Two-phase form of scene_render(), for overlapping the geometry-only work
+// with other engine activity. scene_prepare() runs the cull + order passes
+// and touches NO framebuffer pixels — only the deferred geometry lists — so
+// it is safe to run concurrently with a hardware blit that writes the
+// framebuffer (e.g. a PPA backdrop composite). scene_rasterize() then paints
+// the prepared geometry and must run after that blit has completed. Submit
+// all geometry, call scene_prepare(), then scene_rasterize() once the
+// framebuffer is ready. scene_render() is exactly these two back-to-back and
+// stays the simple choice when there's nothing to overlap; the output is
+// identical either way.
+void scene_prepare(se_render_mode_t mode);
+void scene_rasterize(se_render_mode_t mode);
+
+// Diagnostics for the most recent scene_rasterize(): the geometry counts
+// actually rasterized (post-cull) and the per-phase wallclock split between
+// filled triangles and wireframe edges, in microseconds. For profiling how
+// scene render time divides; any pointer may be NULL.
+void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_us);
+
 // --- Camera & projection ---------------------------------------------
 //
 // The scene projects through a single module-global six-degree-of-freedom

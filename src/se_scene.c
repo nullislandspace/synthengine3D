@@ -8,6 +8,7 @@
 #include "se_direct565.h"   // direct_565_logical_index, direct_565_pack
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"      // scene_raster_stats per-phase timing
 
 static char const* TAG = "scene";
 
@@ -152,21 +153,48 @@ static uint16_t*    s_fb      = NULL;
 static bool         s_rev     = false;
 static uint8_t      s_frame   = 0;      // current frame tag (never 0 while live)
 
+// Rasterize diagnostics — counts (post-cull) + per-phase wallclock of the
+// most recent scene_rasterize(), reported by scene_raster_stats().
+static int          s_stat_tri_n   = 0;
+static int          s_stat_line_n  = 0;
+static int64_t      s_stat_tri_us  = 0;
+static int64_t      s_stat_line_us = 0;
+
 // Optional render passes (frustum cull / depth order). Both default OFF
 // so scene_render() is behaviour- and byte-identical to the no-op cut
 // until a game opts in. See scene_set_options().
 static se_scene_options_t s_opts = { false, false };
 
 void scene_init(void) {
+    // Depth + stamp planes are full-screen (SCENE_PIXELS each) — far too big
+    // for internal SRAM, and touched only during the rasterize pass, so they
+    // stay in PSRAM.
     s_depth = heap_caps_malloc(SCENE_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     s_stamp = heap_caps_malloc(SCENE_PIXELS * sizeof(uint8_t),  MALLOC_CAP_SPIRAM);
-    s_tris  = heap_caps_malloc(SCENE_TRI_CAP  * sizeof(scene_tri_t), MALLOC_CAP_SPIRAM);
-    s_lines = heap_caps_malloc(SCENE_LINE_CAP * sizeof(scene_seg_t), MALLOC_CAP_SPIRAM);
+
+    // The deferred geometry lists go in INTERNAL SRAM when they fit. The
+    // emit + cull + order passes run on them while the PPA backdrop DMA
+    // saturates the PSRAM bus (see the game's on_backdrop): keeping the lists
+    // off PSRAM is what turns that overlap into real parallelism instead of
+    // bus contention, and it makes the cull/order compaction cache-fast.
+    // Fall back to PSRAM if internal RAM is too tight to hold them.
+    size_t const tris_sz  = (size_t)SCENE_TRI_CAP  * sizeof(scene_tri_t);
+    size_t const lines_sz = (size_t)SCENE_LINE_CAP * sizeof(scene_seg_t);
+    s_tris = heap_caps_malloc(tris_sz, MALLOC_CAP_INTERNAL);
+    bool const tris_internal = (s_tris != NULL);
+    if (!s_tris)  s_tris = heap_caps_malloc(tris_sz, MALLOC_CAP_SPIRAM);
+    s_lines = heap_caps_malloc(lines_sz, MALLOC_CAP_INTERNAL);
+    bool const lines_internal = (s_lines != NULL);
+    if (!s_lines) s_lines = heap_caps_malloc(lines_sz, MALLOC_CAP_SPIRAM);
+
     if (!s_depth || !s_stamp || !s_tris || !s_lines) {
         ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p stamp=%p tris=%p lines=%p)",
                  s_depth, s_stamp, s_tris, s_lines);
         return;
     }
+    ESP_LOGI(TAG, "geometry lists: tris=%s (%uKB) lines=%s (%uKB)",
+             tris_internal  ? "INTERNAL" : "PSRAM", (unsigned)(tris_sz  / 1024),
+             lines_internal ? "INTERNAL" : "PSRAM", (unsigned)(lines_sz / 1024));
     // One-time stamp clear so no garbage cell matches the first
     // live frame tag (1). The depth buffer needs no init — a cell is
     // only ever read after its stamp says it was written this frame.
@@ -490,23 +518,53 @@ static void scene_order_pass(void) {
     }
 }
 
-void scene_render(se_render_mode_t mode) {
+void scene_prepare(se_render_mode_t mode) {
     (void)mode;   // only SE_RENDER_ZBUFFER ships today
-
+    // Geometry-only passes — they touch the deferred lists, never the
+    // framebuffer, so this half is safe to run concurrently with a hardware
+    // blit writing the framebuffer (e.g. the PPA backdrop). See the header.
     scene_cull_pass();    // frustum cull (opt-in; no-op when disabled)
     scene_order_pass();   // front-to-back order (opt-in; no-op when disabled)
+}
+
+void scene_rasterize(se_render_mode_t mode) {
+    (void)mode;   // only SE_RENDER_ZBUFFER ships today
+
+    // Diagnostics: counts (post-cull) + per-phase wallclock, so a profiler
+    // can see how the rasterize splits between filled triangles and the
+    // wireframe edges. Three timer reads per frame — negligible.
+    s_stat_tri_n  = s_tri_n;
+    s_stat_line_n = s_line_n;
+    int64_t const t_r0 = esp_timer_get_time();
 
     // Triangles first (per-pixel z-test makes their order irrelevant), in
     // submission order -- identical to the old immediate path.
     for (int i = 0; i < s_tri_n; i++) {
         scene_raster_tri(s_tris[i].v[0], s_tris[i].v[1], s_tris[i].v[2], s_tris[i].packed);
     }
+    int64_t const t_r1 = esp_timer_get_time();
     // Then the wireframe edges, z-tested against the depth the tris wrote.
     for (int i = 0; i < s_line_n; i++) {
         scene_raster_line(s_lines[i].v[0], s_lines[i].v[1], s_lines[i].packed);
     }
+    int64_t const t_r2 = esp_timer_get_time();
+
+    s_stat_tri_us  = t_r1 - t_r0;
+    s_stat_line_us = t_r2 - t_r1;
     s_tri_n  = 0;
     s_line_n = 0;
+}
+
+void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_us) {
+    if (tri_n)   *tri_n   = s_stat_tri_n;
+    if (line_n)  *line_n  = s_stat_line_n;
+    if (tri_us)  *tri_us  = s_stat_tri_us;
+    if (line_us) *line_us = s_stat_line_us;
+}
+
+void scene_render(se_render_mode_t mode) {
+    scene_prepare(mode);     // cull + order (no framebuffer access)
+    scene_rasterize(mode);   // paint the prepared geometry
 }
 
 void scene_flush(void) {
