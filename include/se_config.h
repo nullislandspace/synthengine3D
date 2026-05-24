@@ -131,7 +131,7 @@
 // ---- PPA compositor (se_ppa.h) --------------------------------------
 //
 // The ESP32-P4 PPA blit helper. These are init-time / structural, not
-// hot-loop tunables (they size the completion latch and the client
+// hot-loop tunables (they size the pump's queues and the pump task / client
 // registration once), so they are compile-time #defines per the
 // performance contract.
 

@@ -3,8 +3,10 @@
 A thin, generic wrapper over the **ESP32-P4 PPA** (Pixel-Processing
 Accelerator) for offloading 2D blit work — backdrops, sprite layers, full-band
 fills — off the CPU. It owns the parts every app re-writes when it reaches for
-the PPA: the client lifecycle, an asynchronous completion latch, the
-logical→raw orientation maths, and cache-line-aligned PSRAM layer caches.
+the PPA: the client lifecycle, an ordered job queue driven by a pump task
+(submit is a non-blocking enqueue tagged with a job id; the pump runs jobs in
+submission order in task context), the logical→raw orientation maths, and
+cache-line-aligned PSRAM layer caches.
 
 > **ESP32-P4 only.** The PPA is a P4 peripheral; on other targets this
 > subsystem isn't available. Orientation support is `PAX_O_UPRIGHT` and
