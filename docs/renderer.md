@@ -78,6 +78,33 @@ submit ─▶ [tri list] [edge list] ─▶ scene_render: cull ─▶ order ─�
 (= `SE_RENDER_DEFAULT`) ships. A whole-triangle near-clip guard stays in
 `scene_tri` (it bounds the projection; it is not the central cull).
 
+### Two-phase render (`scene_prepare` / `scene_rasterize`)
+
+`scene_render()` is two halves you can also call separately, to overlap the
+geometry-only work with concurrent framebuffer activity:
+
+```c
+scene_prepare(SE_RENDER_ZBUFFER);     // cull + order — touches NO framebuffer
+// ... kick/await other framebuffer work here (e.g. a hardware blit) ...
+scene_rasterize(SE_RENDER_ZBUFFER);   // paint the prepared geometry
+```
+
+`scene_prepare()` runs the cull and order passes over the deferred lists and
+touches **no framebuffer pixels** — only the geometry lists — so it is safe to
+run *concurrently* with a hardware block writing the framebuffer, e.g. a PPA
+backdrop composite (see [ppa.md](ppa.md)). `scene_rasterize()` then does the
+actual pixel fill and must run **after** that blit completes (near geometry
+projects up into the backdrop region, so it overwrites those pixels). The order
+is: submit all geometry → `scene_prepare()` → kick/await the concurrent
+framebuffer work → `scene_rasterize()`.
+
+`scene_render()` is exactly these two back-to-back, and the output is identical
+either way — use it whenever there's nothing to overlap. The source game uses
+the split: it prepares the scene *during* the PPA sky/sun/mountain DMA (the
+CPU-side transform + cull runs while the blit drives the PSRAM bus), then
+rasterizes once the backdrop is down. For that overlap to be real and not just
+bus contention, keep the geometry lists off PSRAM — see **Buffer caps** below.
+
 ### Optional passes (`scene_set_options`)
 
 The cull and order passes are **opt-in and default OFF**, so out of the box
@@ -114,9 +141,14 @@ anonymous projected triangles; a game's objects know their face normals and
 cull back faces at emit time (e.g. `render.c`'s `emit_cube`), which is cheaper
 and safe regardless of winding. Keep it game-side.
 
-**Buffer caps.** The triangle and edge lists are fixed PSRAM buffers
+**Buffer caps & placement.** The triangle and edge lists are fixed buffers
 (`SCENE_TRI_CAP` / `SCENE_LINE_CAP`, 4096 each); submitting past a cap silently
-drops the extra geometry. A few thousand triangles is well within budget.
+drops the extra geometry. A few thousand triangles is well within budget. They
+are allocated in **internal SRAM** (with a PSRAM fallback if internal RAM is
+too tight) — `scene_init()` logs which it got. Internal placement is what makes
+the `scene_prepare()` overlap pay off: the emit/cull/order passes work the
+lists off the PSRAM bus, so they run in true parallel with a concurrent PSRAM
+framebuffer blit instead of contending for it.
 
 ## Depth buffer
 
@@ -124,13 +156,20 @@ Depth is a scaled reciprocal-z (1/z), the quantity that interpolates linearly
 in screen space — so the per-pixel inner loop is one add, no divide. Larger
 encoded value = nearer.
 
-The depth buffer is **never bulk-cleared**. A parallel 8-bit per-pixel "frame
-stamp" records which frame last wrote each depth; a depth counts only if its
-stamp is the current frame, so a stale pixel reads as infinitely far. That
-makes `scene_begin()` a single counter increment instead of a full-screen
-memset, and confines depth traffic to the pixels the scene actually touches.
-(The stamp wraps every 256 frames; the one-frame, one-pixel mis-resolve that
-could in principle cause is invisible in practice.)
+The depth buffer is **never bulk-cleared**. A per-pixel "frame stamp" records
+which frame last wrote each depth; a depth counts only if its stamp is the
+current frame, so a stale pixel reads as infinitely far. That makes
+`scene_begin()` a single counter increment instead of a full-screen memset, and
+confines depth traffic to the pixels the scene actually touches.
+
+Depth and stamp share **one `uint32` cell per pixel** (`stamp << 16 | depth`),
+not two separate planes. The rasterizer is PSRAM-latency-bound, and folding
+them halves the distinct cache lines the per-pixel depth test touches — one
+combined array plus the framebuffer, instead of a depth plane, a stamp plane
+and the framebuffer. The stamp is the high 16 bits, so it wraps every 65536
+frames (the one-frame, one-pixel mis-resolve that could in principle cause is
+invisible in practice); frame 0 is skipped on wrap so a zero-initialised cell
+never matches a live frame.
 
 ## What the engine does and doesn't do
 
