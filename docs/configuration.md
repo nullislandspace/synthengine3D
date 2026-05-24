@@ -62,6 +62,15 @@ leaves hardcode rotation + stride into their inner loops off these.
 ### Bindings (`se_bindings`)
 - `SE_BINDINGS_MAX` — max remappable controls a game may declare.
 
+### PPA compositor (`se_ppa`)
+- `SE_PPA_MAX_PENDING` — in-flight op cap. Sizes *both* the completion semaphore
+  and the submit guard from one value (so they can't drift); a submit past it is
+  refused (returns `false`), never silently dropped. Raise for an app batching
+  many async blits.
+- `SE_PPA_CLIENT_QUEUE_DEPTH` — per-client queue depth (PPA `max_pending_trans_num`).
+- `SE_PPA_CACHE_LINE` — PSRAM cache-line size (bytes) for layer-cache aligned
+  allocation + the `esp_cache_msync` flush; 128 on the ESP32-P4.
+
 ### Save (`se_save`)
 - `SE_SAVE_SLOT_COUNT` — number of save slots.
 

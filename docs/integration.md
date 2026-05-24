@@ -7,12 +7,15 @@ dependencies and what to change when porting.
 
 - **ESP-IDF** + the **Tanmatsu BSP** (`bsp/display.h`, `bsp/input.h`,
   `bsp/audio.h`, `bsp/led.h`, `bsp/device.h`) — the engine talks to the device
-  through the BSP, and to FreeRTOS, NVS, the PPA driver (host-side), `esp_timer`,
-  `esp_heap_caps`, `esp_cache`.
+  through the BSP, and to FreeRTOS, NVS, `esp_timer`, `esp_heap_caps`.
 - **PAX** (`pax_gfx.h`, `pax_text.h`) — the framebuffer type + a few helpers;
   the hot per-pixel paths are the engine's own `se_direct565` leaves, not PAX.
-- **FreeRTOS** — the audio mixer runs on its own task; the IDF component declares
-  `REQUIRES freertos`.
+- **FreeRTOS** — the audio mixer + the PPA completion ISR run off the main
+  task; the IDF component declares `REQUIRES freertos`.
+- **PPA driver + `esp_cache`** (`esp_driver_ppa`, `esp_mm`) — the `se_ppa`
+  hardware compositor ([ppa.md](ppa.md)). **ESP32-P4 only**; the IDF component
+  adds `REQUIRES … esp_driver_ppa esp_mm` for them. A non-P4 port drops `se_ppa`
+  (no other subsystem depends on it).
 
 The engine includes **no game headers** — the boundary is one-directional. (You
 can verify: nothing under `include/` or `src/` includes a game header.)
@@ -21,8 +24,8 @@ can verify: nothing under `include/` or `src/` includes a game header.)
 
 Under `idf.py`, `synthengine3D/CMakeLists.txt` registers a normal IDF component
 via `idf_component_register()` (`INCLUDE_DIRS include`, `PRIV_INCLUDE_DIRS src
-src/internal`, `REQUIRES freertos`). A full IDF app (e.g. graceloader itself)
-consumes it like any component:
+src/internal`, `REQUIRES freertos esp_driver_ppa esp_mm`). A full IDF app (e.g.
+graceloader itself) consumes it like any component:
 
 - **Vendored:** drop `synthengine3D/` into your project's `components/` (or add
   its parent to `EXTRA_COMPONENT_DIRS`).
@@ -69,8 +72,9 @@ match.
 3. **Bootstrap:** call `se_run(&cfg, &cb, user)` from `app_main` with at least
    `cb.on_update`. The engine brings up display / audio / scene / settings
    itself — don't double-init them.
-4. **Build green check:** the engine builds with `REQUIRES freertos` only; if
-   you see undefined BSP/PAX symbols, they're satisfied by your app's link
+4. **Build green check:** the engine builds with `REQUIRES freertos
+   esp_driver_ppa esp_mm`; if you see undefined BSP/PAX symbols, they're
+   satisfied by your app's link
    against the platform libs (the engine declares against them, doesn't bundle
    them).
 

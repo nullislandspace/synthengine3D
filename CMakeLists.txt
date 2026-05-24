@@ -27,6 +27,7 @@ set(SE_SRCS
     src/se_hw.c            # EF: device-global hardware settings (volume/brightness)
     src/se_ui.c            # EF: UI / list-menu system
     src/se_bindings.c      # EF: input bindings (remap + persistence)
+    src/se_ppa.c           # E7: ESP32-P4 PPA blit helper (backdrop/sprite offload)
 )
 
 if(COMMAND idf_component_register)
@@ -35,7 +36,9 @@ if(COMMAND idf_component_register)
         SRCS ${SE_SRCS}
         INCLUDE_DIRS "include"
         PRIV_INCLUDE_DIRS "src" "src/internal"
-        REQUIRES freertos
+        # esp_driver_ppa: the PPA peripheral driver (se_ppa.c);
+        # esp_mm: esp_cache_msync for the PPA layer-cache flush.
+        REQUIRES freertos esp_driver_ppa esp_mm
     )
 else()
     # ---- Plain-CMake mode (this game's app.so build) ----------------

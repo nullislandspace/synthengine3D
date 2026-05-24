@@ -18,6 +18,7 @@ minor versions may still add (and, while < 1.0, occasionally change) it.
 |---|---|---|
 | **Application framework** | `se_run.h` | Inversion-of-control run loop: you call `se_run(&cfg, &cb, user)` once; the engine owns device bootstrap, the frame loop + delta-time, the input-queue pump, the device-global keys (volume / audio-jack / F1-exit), vsync + blit + double-buffer swap, and a backdrop hook. Your game is a set of callbacks. |
 | **3D renderer** | `se_scene.h` | Per-pixel **z-buffered** software rasterizer + **6-DOF** pinhole camera + projection. Submit world-space triangles / wireframe edges; the engine projects, depth-tests and draws. Deferred: it accumulates the frame then `scene_render()`s it, with opt-in **frustum-cull** and **front-to-back ordering** passes (`scene_set_options`). |
+| **PPA compositor** | `se_ppa.h` | **ESP32-P4 PPA** hardware blit offload for 2D backdrops / sprite layers: fill / copy / colour-keyed blend on full-width screen bands, an async completion latch (submit many, wait once), the logical→raw orientation maths, and cache-line-aligned PSRAM layer caches — so the CPU stays free for the 3D scene. (P4-only; degrades to a no-op elsewhere.) |
 | **Audio** | `se_audio.h`, `se_audio_source.h`, `se_audio_dsp.h`, `se_voice.h`, `se_music_procedural.h` | 22050 Hz / s16 / stereo software mixer over the BSP I2S channel: one music slot + N SFX voices, app-pushed mute groups, idle power-down. DSP primitives (oscillators, envelopes, biquad), **pluggable synth voices** (`se_voice_t` note-on/off — built-in subtractive/noise, or your own; MIDI-ready), and a config-driven, seed-derived procedural music source with a voice per role (supply a `se_music_config_t`, or `NULL` for the synthwave preset). |
 | **UI / menus** | `se_ui.h` | Data-driven vertical list menus (label / checkbox / value / slider / custom-drawn rows), an engine-owned cursor state machine, and a blocking "press a key" capture for rebinds. |
 | **Input bindings** | `se_bindings.h` | Remappable, NVS-persisted key bindings: the game declares its controls + defaults; the engine loads, persists and answers them. |
@@ -106,6 +107,7 @@ The same `CMakeLists.txt` builds two ways (see [`docs/integration.md`](docs/inte
 - [`docs/getting-started.md`](docs/getting-started.md) — build an app step by step.
 - [`docs/architecture.md`](docs/architecture.md) — subsystems, the frame lifecycle, the IoC model, public vs internal, the performance contract.
 - [`docs/renderer.md`](docs/renderer.md) — the deferred 3D pipeline, camera, projection, z-buffer.
+- [`docs/ppa.md`](docs/ppa.md) — the ESP32-P4 PPA blit helper (2D backdrop / sprite offload).
 - [`docs/audio.md`](docs/audio.md) — the mixer, source contracts, DSP, procedural music.
 - [`docs/ui.md`](docs/ui.md) — menus + the input-bindings/remap flow.
 - [`docs/save.md`](docs/save.md) — the save-slot framework + NBT.

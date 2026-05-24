@@ -128,6 +128,34 @@
 #define SE_BINDINGS_MAX  16
 #endif
 
+// ---- PPA compositor (se_ppa.h) --------------------------------------
+//
+// The ESP32-P4 PPA blit helper. These are init-time / structural, not
+// hot-loop tunables (they size the completion latch and the client
+// registration once), so they are compile-time #defines per the
+// performance contract.
+
+// In-flight op cap. Sizes BOTH the counting completion semaphore AND the
+// submit guard from one value, so they can never drift: a submit past the
+// cap is refused (returns false) rather than over-running the semaphore.
+// Raise it for an app that batches many independent async blits.
+#ifndef SE_PPA_MAX_PENDING
+#define SE_PPA_MAX_PENDING  8
+#endif
+
+// Per-client queue depth (PPA `max_pending_trans_num`): how many ops of one
+// type may be queued before the first completes. 1 matches the serialised
+// backdrop pattern; raise it for a client that pipelines same-type ops.
+#ifndef SE_PPA_CLIENT_QUEUE_DEPTH
+#define SE_PPA_CLIENT_QUEUE_DEPTH  1
+#endif
+
+// PSRAM cache-line size (bytes) for layer-cache aligned allocation and the
+// esp_cache_msync flush. 128 is the ESP32-P4 external-memory L2 line.
+#ifndef SE_PPA_CACHE_LINE
+#define SE_PPA_CACHE_LINE  128
+#endif
+
 // ---- UI / menu system (se_ui.h) -------------------------------------
 //
 // Theme colours (ARGB8888) for the list-menu renderer, and the fixed

@@ -49,6 +49,26 @@ not yet frozen — minor releases may still adjust the API as it settles toward
   with optional pitch-envelope and amplitude-LFO modulation. Covers the whole
   synthwave palette and is what the per-role specs build.
 
+### Added — `se_ppa.h` (ESP32-P4 PPA blit helper)
+- **A generic PPA (Pixel-Processing-Accelerator) compositor** for offloading 2D
+  blit work — backdrops, sprite layers, band fills — off the CPU. It owns the
+  driver mechanics every app re-writes: the FILL / SRM / BLEND client lifecycle,
+  an async **completion latch** (a counting semaphore — submit many
+  non-blocking, then `se_ppa_wait_all()`), the **logical→raw orientation maths**
+  (callers think in logical screen bands; the engine maps them to raw PPA
+  picture-blocks — `PAX_O_UPRIGHT` + `PAX_O_ROT_CW` verified), and cache-line-
+  aligned **PSRAM layer caches** with the one-shot C2M flush PPA's DMA needs.
+- **API:** `se_ppa_init` · `se_ppa_layer_alloc` / `_flush` / `_free` ·
+  `se_ppa_fill` / `_blit` / `_blend_key` (non-blocking submits returning a
+  meaningful `bool` — `false` = refused, latch never desyncs) · `se_ppa_wait_one`
+  / `_wait_all` / `_pending`. New `se_ppa_layer_t`. Knobs in `se_config.h`:
+  `SE_PPA_MAX_PENDING`, `SE_PPA_CLIENT_QUEUE_DEPTH`, `SE_PPA_CACHE_LINE`.
+- **What stays with the caller:** the artwork, the band layout, and the submit
+  *choreography* (ordering + waits) — PPA does not order ops across client
+  types, so overlapping writes are the caller's barrier. ESP32-P4 only (the IDF
+  component now `REQUIRES … esp_driver_ppa esp_mm`); degrades to a logged no-op
+  if init fails. Docs: `docs/ppa.md` + `examples/backdrop/`.
+
 ### Changed (internal)
 - The procedural generator's six hardcoded voices became `se_voice_t`s driven
   through the note-on/off interface (the pad is now three voices — a chord —
