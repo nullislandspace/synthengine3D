@@ -36,10 +36,11 @@ void app_main(void) {
 ## 2. Drawing
 
 The renderer is world-space: **x = lateral, y = up, z = forward** (into the
-screen), camera at z = 0. Set the camera once per frame, then submit triangles
-and wireframe edges between `scene_begin()` and `scene_render()`:
+screen). Set the camera once per frame, then submit triangles and wireframe
+edges between `scene_begin()` and `scene_render()`:
 
 ```c
+render_set_camera(0.0f, 1.0f);                           // eye at x=0, height 1
 scene_begin(fb);
 scene_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, 0xFFRRGGBBu);   // filled, z-tested
 scene_line(x0,y0,z0, x1,y1,z1,           0xFFRRGGBBu);   // wireframe edge
@@ -48,7 +49,23 @@ scene_render(SE_RENDER_ZBUFFER);                          // rasterize the frame
 
 Order doesn't matter — the z-buffer resolves visibility. For 2D overlays (HUD,
 text) draw straight onto `fb` with `se_text.h` / `se_direct565.h` / PAX after
-the scene. Full details: [renderer.md](renderer.md), [objects.md](objects.md).
+the scene.
+
+The camera is full **6-DOF** — `render_set_camera(x, y)` is the shorthand for
+an eye on the z = 0 plane looking down +z; `render_set_camera_6dof(x, y, z,
+yaw, pitch, roll)` moves and orients it freely.
+
+Two optional, **output-neutral** passes (they change only speed, never the
+pixels) are off by default; enable per scene and measure:
+
+```c
+scene_set_options(&(se_scene_options_t){
+    .frustum_cull = true,    // drop off-screen geometry — a near-pure win
+    .depth_order  = false,   // front-to-back early-z — only helps heavy overdraw
+});
+```
+
+Full details: [renderer.md](renderer.md), [objects.md](objects.md).
 
 ## 3. Sound
 

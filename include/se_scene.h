@@ -41,10 +41,11 @@
 // with a small bias so an edge wins against the coplanar face it outlines
 // but still loses to genuinely nearer geometry). Holding the whole frame
 // lets the engine own the algorithm (z-buffer today; painter's / sorted /
-// tiled later) and, in future, cull + order centrally against the FOV /
-// resolution — without any game call site changing. Those cull/order
-// passes ship as no-ops first (the renderer is otherwise behaviour-
-// identical to the old hybrid-immediate pipeline).
+// tiled later) and cull + order the geometry centrally against the FOV /
+// resolution — without any game call site changing. Those cull + order
+// passes (se_scene_options_t / scene_set_options) are opt-in and default
+// OFF, so the renderer is byte-identical to the old hybrid-immediate
+// pipeline until a game enables them.
 
 // Which rasterization algorithm scene_render() uses. Only the per-pixel
 // z-buffer ships today; the enum exists so a game can select a different
@@ -78,9 +79,9 @@ void scene_line(float x0, float y0, float z0,
 
 // Rasterize the whole accumulated frame (triangles then edges) with the
 // chosen algorithm, then empty the lists. Call once after all geometry
-// for the frame has been submitted. Central cull + order passes run here
-// (no-ops in the current cut). SE_RENDER_ZBUFFER reproduces the legacy
-// per-pixel-depth output exactly.
+// for the frame has been submitted. The central cull + order passes run
+// here (opt-in via scene_set_options; off by default). SE_RENDER_ZBUFFER
+// reproduces the legacy per-pixel-depth output exactly.
 void scene_render(se_render_mode_t mode);
 
 // Back-compat alias for scene_render(SE_RENDER_ZBUFFER).
@@ -88,25 +89,68 @@ void scene_flush(void);
 
 // --- Camera & projection ---------------------------------------------
 //
-// The scene projects through a single module-global pinhole camera, set
-// once per frame before submitting geometry. Kept as a struct so it can
-// gain fields later (zoom, shake, look-ahead) without touching call
-// sites. `x` is the lateral eye position, `y` the eye height; both are
-// world units. The projection itself uses the RENDER_* constants from
-// se_config.h (overridable per game).
+// The scene projects through a single module-global six-degree-of-freedom
+// pinhole camera, set once per frame before submitting geometry. Position
+// is the eye in world units; orientation is yaw / pitch / roll in radians,
+// applied in that order: yaw about world-up (+y), then pitch about the
+// camera's right (+x), then roll about forward (+z). At zero orientation
+// the camera looks straight down +z with +y up and +x right — identical
+// to the legacy fixed camera. The projection uses the RENDER_* constants
+// from se_config.h (focal length / principal point — i.e. the FOV;
+// overridable per game). The engine caches the rotation basis on each
+// set, so the trig runs once per frame, not once per vertex.
 typedef struct {
-    float x;
-    float y;
+    float x, y, z;            // eye position (world units)
+    float yaw, pitch, roll;   // orientation (radians)
 } render_camera_t;
 
-// Set / read the scene camera. Call render_set_camera() once per frame
-// before the first scene_tri / scene_line.
+// Set / read the scene camera. Call once per frame before the first
+// scene_tri / scene_line. render_set_camera_6dof() sets the full pose;
+// render_set_camera(x, y) is the legacy shorthand for an eye on the
+// z = 0 plane looking straight down +z (zero orientation), which projects
+// byte-for-byte like the pre-6DOF engine.
 void            render_set_camera(float x, float y);
+void            render_set_camera_6dof(float x, float y, float z,
+                                       float yaw, float pitch, float roll);
 render_camera_t render_camera(void);
 
-// Project a world point (x_w, y_w, z_w) to screen pixels using the
-// current camera. y = 0 is the ground plane, +y up, +z forward (away
-// from the camera). Out values are in pax logical pixels. (scene_tri /
-// scene_line project internally; this is for game code that needs to
-// project a point itself — e.g. drawing a floor shadow.)
+// Project a world point (x_w, y_w, z_w) to screen pixels through the
+// current camera pose. At zero orientation: y = 0 is the ground plane,
+// +y up, +z forward (away from the camera). Out values are in pax logical
+// pixels. (scene_tri / scene_line project internally; this is for game
+// code that needs to project a point itself — e.g. drawing a floor
+// shadow.)
 void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy);
+
+// --- Optional render passes ------------------------------------------
+//
+// Two opt-in optimizations scene_render() can run before rasterizing.
+// Both are OUTPUT-NEUTRAL: they change only how fast the frame is drawn,
+// never the pixels, so they are always safe to toggle live (between
+// frames or mid-run). Both default OFF — the engine reproduces the
+// legacy pipeline exactly until a game opts in. They are independent
+// features with opposite cost profiles, so measure each on its own.
+//
+// (Back-face culling is intentionally absent: the engine sees only
+// anonymous projected triangles, whereas a game's objects know their
+// face normals and can cull back faces at emit time — cheaper, and safe
+// for any winding. Keep back-face culling in the game, not here.)
+typedef struct {
+    // Drop triangles / edges that project entirely off-screen before
+    // rasterizing. Cheap O(n) screen-space test; a near-pure win when the
+    // world submits geometry outside the FOV (far objects before they
+    // swing into view). Runs after projection, so it respects the camera
+    // pose + FOV automatically (the screen rect IS the projected frustum).
+    bool frustum_cull;
+    // Sort triangles front-to-back so occluded fragments fail the depth
+    // test with no framebuffer write (early-z). Costs an O(n log n) sort
+    // per frame: wins under heavy overdraw (dense scenes), can lose under
+    // light overdraw. Edges are unaffected (they never write depth).
+    bool depth_order;
+} se_scene_options_t;
+
+// Set / read the optional-pass configuration. Takes effect from the next
+// scene_render(). Passing NULL resets to defaults (both OFF). Toggling
+// one pass independently is a get-modify-set on the returned struct.
+void               scene_set_options(se_scene_options_t const* opts);
+se_scene_options_t scene_get_options(void);

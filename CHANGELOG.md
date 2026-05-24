@@ -14,6 +14,36 @@ While the version is `0.x`, the surface is documented and semver-tracked but
 not yet frozen — minor releases may still adjust the API as it settles toward
 `1.0`.
 
+## [0.3.0] — 2026-05-24
+
+### Changed (breaking — allowed pre-1.0)
+- **`render_camera_t` is now a full 6-DOF pose:** `{ x, y, z, yaw, pitch,
+  roll }` (was `{ x, y }`). The two leading fields are unchanged, so code
+  that reads `cam.x` / `cam.y` is source-compatible; the struct layout grew,
+  hence a (pre-1.0) breaking bump. At zero `z` / orientation the projection
+  is **byte-for-byte identical** to the old fixed pinhole.
+
+### Added
+- **`render_set_camera_6dof(x, y, z, yaw, pitch, roll)`** — position the eye
+  anywhere and orient it (yaw about world-up, then pitch about right, then
+  roll about forward; radians). `render_set_camera(x, y)` stays as the legacy
+  shorthand (eye at `z = 0`, zero orientation). The rotation basis is cached
+  per `set`, so the trig runs once per frame, not per vertex.
+- **`se_scene_options_t`** + **`scene_set_options()` / `scene_get_options()`**
+  — two opt-in, **output-neutral** render passes, toggled at runtime, both
+  default OFF:
+  - `frustum_cull` — drop geometry that projects entirely off-screen. Because
+    it runs after projection, it respects the camera pose + FOV for free.
+  - `depth_order` — front-to-back triangle sort for early-z; a win under heavy
+    overdraw, measure under light overdraw.
+  Back-face culling is intentionally NOT an engine pass — it belongs in the
+  game's objects, which know their face normals (e.g. `emit_cube`).
+
+### Resolved
+- The ER first cut's no-op cull/order seams are now real, opt-in passes; the
+  camera gained the deferred-noted "zoom / shake / look-ahead" headroom as
+  full 6-DOF. Defaults keep `scene_render()` byte-identical to 0.2.0.
+
 ## [0.2.0] — 2026-05-24
 
 ### Changed (breaking — allowed pre-1.0)

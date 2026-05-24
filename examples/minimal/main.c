@@ -24,6 +24,14 @@ static void on_init(void* user) {
     // NULL config = the built-in synthwave preset; se_music_synthwave_preset()
     // returns it explicitly, and a game can pass its own se_music_config_t.
     audio_mixer_set_music(music_procedural_create(NULL, 0x5EED));
+
+    // Optional, output-neutral scene passes (both default OFF). Frustum cull
+    // is a near-pure win, so turn it on; depth order is an overdraw-dependent
+    // trade-off, so leave it off until you've measured your scenes.
+    scene_set_options(&(se_scene_options_t){
+        .frustum_cull = true,
+        .depth_order  = false,
+    });
 }
 
 // Per frame: advance the spin. dt is seconds since the last frame.
@@ -36,6 +44,8 @@ static void on_update(float dt, void* user) {
 static void on_render(pax_buf_t* fb, void* user) {
     (void)user;
     render_set_camera(0.0f, 1.0f);          // eye at x=0, height 1, looking +z
+    // Full pose if you need it (eye xyz + yaw/pitch/roll, radians):
+    //   render_set_camera_6dof(0, 1, 0,  0, 0, 0);   // same as the line above
     scene_begin(fb);                         // start the frame's 3D pass
 
     // A triangle standing at z = 4, rotating about the vertical axis.

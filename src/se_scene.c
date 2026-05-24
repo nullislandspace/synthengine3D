@@ -1,6 +1,7 @@
 #include "se_scene.h"
 
 #include <math.h>
+#include <stdlib.h>         // qsort (depth-order pass)
 #include <string.h>
 
 #include "se_config.h"      // DISPLAY_* + RENDER_* projection constants
@@ -12,26 +13,76 @@ static char const* TAG = "scene";
 
 // --- Camera -------------------------------------------------------------------
 //
-// The scene projects through one module-global pinhole camera, set once
-// per frame via render_set_camera() before any geometry is submitted.
-// x defaults to track centre, y to the resting eye height; the host
-// overwrites both every frame (e.g. to follow a ship).
-static render_camera_t s_camera = { 0.0f, RENDER_CAM_Y };
+// The scene projects through one module-global 6-DOF pinhole camera, set
+// once per frame before any geometry is submitted. We cache the rotation
+// basis (right / up / forward in world space) on each set, so the per-
+// vertex transform is a plain 3x3 multiply and the trig runs once per
+// frame, not once per vertex. At zero orientation the basis is exactly
+// identity and the world->camera transform reduces to the legacy
+// (x - cam.x, y - cam.y, z) subtraction — so render_set_camera(x, y)
+// (eye at z = 0, no rotation) projects byte-for-byte like the old fixed
+// camera.
+static render_camera_t s_camera = { 0.0f, RENDER_CAM_Y, 0.0f, 0.0f, 0.0f, 0.0f };
+static float s_right[3] = { 1.0f, 0.0f, 0.0f };
+static float s_up[3]    = { 0.0f, 1.0f, 0.0f };
+static float s_fwd[3]   = { 0.0f, 0.0f, 1.0f };
+
+// Rebuild the cached world-space basis from yaw / pitch / roll. The
+// columns of M = Ry(yaw) * Rx(pitch) * Rz(roll) are the camera's right /
+// up / forward axes in world space. At zero angles cosf/sinf return
+// exactly 1/0, so the basis is exactly identity (right=+x, up=+y,
+// forward=+z) and the projection matches the pre-6DOF engine bit-for-bit.
+static void camera_build_basis(float yaw, float pitch, float roll) {
+    float const cy = cosf(yaw),   sy = sinf(yaw);
+    float const cp = cosf(pitch), sp = sinf(pitch);
+    float const cr = cosf(roll),  sr = sinf(roll);
+    s_right[0] = cy * cr + sy * sp * sr;
+    s_right[1] = cp * sr;
+    s_right[2] = -sy * cr + cy * sp * sr;
+    s_up[0]    = -cy * sr + sy * sp * cr;
+    s_up[1]    = cp * cr;
+    s_up[2]    = sy * sr + cy * sp * cr;
+    s_fwd[0]   = sy * cp;
+    s_fwd[1]   = -sp;
+    s_fwd[2]   = cy * cp;
+}
+
+void render_set_camera_6dof(float x, float y, float z,
+                            float yaw, float pitch, float roll) {
+    s_camera.x   = x;   s_camera.y     = y;     s_camera.z    = z;
+    s_camera.yaw = yaw; s_camera.pitch = pitch; s_camera.roll = roll;
+    camera_build_basis(yaw, pitch, roll);
+}
 
 void render_set_camera(float x, float y) {
-    s_camera.x = x;
-    s_camera.y = y;
+    // Legacy shorthand: eye on the z = 0 plane, looking straight down +z.
+    render_set_camera_6dof(x, y, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 render_camera_t render_camera(void) {
     return s_camera;
 }
 
+// World point -> camera space (right / up / forward components): translate
+// by the eye, then rotate by the cached basis. At identity orientation
+// this is exactly (x - cam.x, y - cam.y, z - cam.z).
+static inline void camera_transform(float x, float y, float z,
+                                    float* cx, float* cy, float* cz) {
+    float const dx = x - s_camera.x;
+    float const dy = y - s_camera.y;
+    float const dz = z - s_camera.z;
+    *cx = s_right[0] * dx + s_right[1] * dy + s_right[2] * dz;
+    *cy = s_up[0]    * dx + s_up[1]    * dy + s_up[2]    * dz;
+    *cz = s_fwd[0]   * dx + s_fwd[1]   * dy + s_fwd[2]   * dz;
+}
+
 void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy) {
-    if (z_w < 0.01f) z_w = 0.01f;  // guard against /0 if a near-clip slips through
-    float const inv_z = 1.0f / z_w;
-    *out_sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * (x_w - s_camera.x) * inv_z;
-    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y_w - s_camera.y) * inv_z;
+    float cx, cy, cz;
+    camera_transform(x_w, y_w, z_w, &cx, &cy, &cz);
+    if (cz < 0.01f) cz = 0.01f;  // guard against /0 if a near-clip slips through
+    float const inv_z = 1.0f / cz;
+    *out_sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * cx * inv_z;
+    *out_sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * cy * inv_z;
 }
 
 // --- Depth encoding -----------------------------------------------------------
@@ -101,6 +152,11 @@ static uint16_t*    s_fb      = NULL;
 static bool         s_rev     = false;
 static uint8_t      s_frame   = 0;      // current frame tag (never 0 while live)
 
+// Optional render passes (frustum cull / depth order). Both default OFF
+// so scene_render() is behaviour- and byte-identical to the no-op cut
+// until a game opts in. See scene_set_options().
+static se_scene_options_t s_opts = { false, false };
+
 void scene_init(void) {
     s_depth = heap_caps_malloc(SCENE_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     s_stamp = heap_caps_malloc(SCENE_PIXELS * sizeof(uint8_t),  MALLOC_CAP_SPIRAM);
@@ -130,16 +186,18 @@ void scene_begin(pax_buf_t* fb) {
 
 // --- Projection ---------------------------------------------------------------
 
-// Project a world point to (screen x, screen y, 1/z). z is clamped to
-// the near plane the same way the old per-object renderers clamped
-// it, so the projection can't blow up and the visual result matches
-// the pre-z-buffer pipeline.
-static inline void scene_project(float x, float y, float z, scene_vtx_t* out) {
-    if (z < RENDER_NEAR_CLIP_Z) z = RENDER_NEAR_CLIP_Z;
-    float const inv_z = 1.0f / z;
-    render_camera_t const cam = render_camera();
-    out->sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * (x - cam.x) * inv_z;
-    out->sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * (y - cam.y) * inv_z;
+// Project a *camera-space* point (right, up, forward) to (screen x,
+// screen y, 1/z). Forward-z is clamped to the near plane the same way
+// the old per-object renderers clamped world-z, so the projection can't
+// blow up and the visual result matches the pre-z-buffer pipeline. The
+// world->camera rotate+translate is done once by camera_transform()
+// before this, so a vertex shared between the near cull and the
+// projection is transformed only once.
+static inline void scene_project_cam(float cx, float cy, float cz, scene_vtx_t* out) {
+    if (cz < RENDER_NEAR_CLIP_Z) cz = RENDER_NEAR_CLIP_Z;
+    float const inv_z = 1.0f / cz;
+    out->sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * cx * inv_z;
+    out->sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * cy * inv_z;
     out->w  = inv_z;
 }
 
@@ -295,55 +353,148 @@ void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
                float x2, float y2, float z2, uint32_t argb) {
     if (!s_tris) return;
-    // Whole-triangle near cull: drop it only if every vertex is
-    // behind the near plane (otherwise the per-vertex clamp in
-    // scene_project keeps the projection bounded). This is a
-    // projection guard, not the central frustum cull (that is the
-    // no-op seam in scene_render).
-    if (z0 < RENDER_NEAR_CLIP_Z && z1 < RENDER_NEAR_CLIP_Z && z2 < RENDER_NEAR_CLIP_Z) {
+    float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
+    camera_transform(x0, y0, z0, &c0x, &c0y, &c0z);
+    camera_transform(x1, y1, z1, &c1x, &c1y, &c1z);
+    camera_transform(x2, y2, z2, &c2x, &c2y, &c2z);
+    // Whole-triangle near cull: drop it only if every vertex is behind
+    // the near plane in CAMERA space (so it is correct under any camera
+    // pose, not just the forward-looking default; otherwise the per-
+    // vertex clamp in scene_project_cam keeps the projection bounded).
+    // This is a projection guard, not the central frustum cull (that is
+    // scene_cull_pass, opt-in via scene_set_options).
+    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z && c2z < RENDER_NEAR_CLIP_Z) {
         return;
     }
     if (s_tri_n >= SCENE_TRI_CAP) return;   // overflow: drop extra tris
     scene_tri_t* t = &s_tris[s_tri_n++];
-    scene_project(x0, y0, z0, &t->v[0]);
-    scene_project(x1, y1, z1, &t->v[1]);
-    scene_project(x2, y2, z2, &t->v[2]);
+    scene_project_cam(c0x, c0y, c0z, &t->v[0]);
+    scene_project_cam(c1x, c1y, c1z, &t->v[1]);
+    scene_project_cam(c2x, c2y, c2z, &t->v[2]);
     t->packed = direct_565_pack(argb, s_rev);
 }
 
 void scene_line(float x0, float y0, float z0,
                 float x1, float y1, float z1, uint32_t argb) {
     if (!s_lines) return;
-    if (z0 < RENDER_NEAR_CLIP_Z && z1 < RENDER_NEAR_CLIP_Z) return;
+    float c0x, c0y, c0z, c1x, c1y, c1z;
+    camera_transform(x0, y0, z0, &c0x, &c0y, &c0z);
+    camera_transform(x1, y1, z1, &c1x, &c1y, &c1z);
+    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z) return;
     if (s_line_n >= SCENE_LINE_CAP) return;
     scene_seg_t* seg = &s_lines[s_line_n++];
-    scene_project(x0, y0, z0, &seg->v[0]);
-    scene_project(x1, y1, z1, &seg->v[1]);
+    scene_project_cam(c0x, c0y, c0z, &seg->v[0]);
+    scene_project_cam(c1x, c1y, c1z, &seg->v[1]);
     seg->packed = direct_565_pack(argb, s_rev);
 }
 
 // --- Deferred render: cull -> order -> rasterize ------------------------------
 //
-// Central cull / order seams. No-ops in this cut: Race the Synth pre-culls
-// in how world.c generates the object list and submits naive geometry, so
-// the first ER cut is behaviour-identical to the old hybrid-immediate
-// pipeline. Real work goes here later (frustum + back-face rejection tuned
-// to FOV/resolution; front-to-back ordering for early-z on the fill-bound
-// device) WITHOUT touching any game submit call site.
-static void scene_cull_pass(void) {
-    // TODO(ER): frustum + back-face cull of s_tris / s_lines in place.
+// Central cull / order passes, both opt-in via scene_set_options() and
+// both output-neutral: they change only how fast scene_render() produces
+// the SAME image, never the image itself. With both off (the default) the
+// pipeline is byte-identical to the original hybrid-immediate path. Each
+// runs against the already-projected geometry, so it respects the camera
+// pose + FOV for free WITHOUT touching any game submit call site.
+//
+// NB: back-face culling is deliberately NOT here. The engine only sees
+// anonymous projected triangles; the game's objects know their face
+// normals and already cull back faces at emit time (e.g. render.c's
+// emit_cube), which is both cheaper and safe regardless of winding.
+
+void scene_set_options(se_scene_options_t const* opts) {
+    if (opts == NULL) {
+        s_opts.frustum_cull = false;
+        s_opts.depth_order  = false;
+    } else {
+        s_opts = *opts;
+    }
 }
+
+se_scene_options_t scene_get_options(void) {
+    return s_opts;
+}
+
+// A primitive is off-screen iff all its vertices lie outside the SAME
+// screen edge (convex-hull argument: the whole primitive is then in that
+// half-plane and covers no on-screen pixel). Conservative — a primitive
+// straddling a corner off-screen is not caught here, but the per-pixel
+// clip in scene_vrun / scene_raster_line handles that for free. The
+// screen rect is the projected frustum's four side planes, so this is
+// frustum culling that already accounts for the camera pose and FOV.
+static inline bool tri_offscreen(scene_tri_t const* t) {
+    float const W = (float)DISPLAY_LOG_W, H = (float)DISPLAY_LOG_H;
+    if (t->v[0].sx <  0.0f && t->v[1].sx <  0.0f && t->v[2].sx <  0.0f) return true;
+    if (t->v[0].sx >= W    && t->v[1].sx >= W    && t->v[2].sx >= W)    return true;
+    if (t->v[0].sy <  0.0f && t->v[1].sy <  0.0f && t->v[2].sy <  0.0f) return true;
+    if (t->v[0].sy >= H    && t->v[1].sy >= H    && t->v[2].sy >= H)    return true;
+    return false;
+}
+
+static inline bool seg_offscreen(scene_seg_t const* s) {
+    float const W = (float)DISPLAY_LOG_W, H = (float)DISPLAY_LOG_H;
+    if (s->v[0].sx <  0.0f && s->v[1].sx <  0.0f) return true;
+    if (s->v[0].sx >= W    && s->v[1].sx >= W)    return true;
+    if (s->v[0].sy <  0.0f && s->v[1].sy <  0.0f) return true;
+    if (s->v[0].sy >= H    && s->v[1].sy >= H)    return true;
+    return false;
+}
+
+// Frustum cull: compact off-screen primitives out of the triangle and
+// edge lists in place (stable, preserving relative order). Survivors
+// rasterize unchanged; dropped primitives covered zero pixels, so the
+// output is identical — only the per-primitive setup work is saved.
+static void scene_cull_pass(void) {
+    if (!s_opts.frustum_cull) return;
+    int w = 0;
+    for (int i = 0; i < s_tri_n; i++) {
+        if (!tri_offscreen(&s_tris[i])) {
+            if (w != i) s_tris[w] = s_tris[i];
+            w++;
+        }
+    }
+    s_tri_n = w;
+    w = 0;
+    for (int i = 0; i < s_line_n; i++) {
+        if (!seg_offscreen(&s_lines[i])) {
+            if (w != i) s_lines[w] = s_lines[i];
+            w++;
+        }
+    }
+    s_line_n = w;
+}
+
+// Front-to-back triangle comparator: nearer first. Vertex w is 1/z
+// (larger = nearer); the sum of the three w's orders by inverse centroid
+// depth without a divide. Ties keep an arbitrary order — harmless, since
+// the per-pixel z-test resolves same-depth triangles either way.
+static int tri_cmp_near_first(void const* pa, void const* pb) {
+    scene_tri_t const* a = (scene_tri_t const*)pa;
+    scene_tri_t const* b = (scene_tri_t const*)pb;
+    float const wa = a->v[0].w + a->v[1].w + a->v[2].w;
+    float const wb = b->v[0].w + b->v[1].w + b->v[2].w;
+    if (wa > wb) return -1;   // a is nearer -> rasterize earlier
+    if (wa < wb) return 1;
+    return 0;
+}
+
+// Depth order: sort triangles front-to-back so occluded fragments fail
+// the depth test with no framebuffer write (early-z). The final depth
+// buffer is order-independent (max-wins per pixel), so the image is
+// identical; only the count of framebuffer writes changes. Edges are
+// never sorted — they don't write depth, so their order can't matter.
 static void scene_order_pass(void) {
-    // TODO(ER): front-to-back sort of s_tris so occluded fragments fail
-    // early-z without being written (the likely win on a fill-bound GPU-less
-    // device). Edges stay drawn after tris regardless of order.
+    if (!s_opts.depth_order) return;
+    if (s_tri_n > 1) {
+        qsort(s_tris, (size_t)s_tri_n, sizeof(scene_tri_t), tri_cmp_near_first);
+    }
 }
 
 void scene_render(se_render_mode_t mode) {
     (void)mode;   // only SE_RENDER_ZBUFFER ships today
 
-    scene_cull_pass();    // no-op seam
-    scene_order_pass();   // no-op seam
+    scene_cull_pass();    // frustum cull (opt-in; no-op when disabled)
+    scene_order_pass();   // front-to-back order (opt-in; no-op when disabled)
 
     // Triangles first (per-pixel z-test makes their order irrelevant), in
     // submission order -- identical to the old immediate path.
