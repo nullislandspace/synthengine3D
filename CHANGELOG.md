@@ -14,7 +14,10 @@ While the version is `0.x`, the surface is documented and semver-tracked but
 not yet frozen — minor releases may still adjust the API as it settles toward
 `1.0`.
 
-## [0.3.0] — 2026-05-24
+## [Unreleased]
+
+> Committed but not yet assigned a version number. These changes sit on top of
+> 0.2.0 until a release version is chosen.
 
 ### Changed (breaking — allowed pre-1.0)
 - **`render_camera_t` is now a full 6-DOF pose:** `{ x, y, z, yaw, pitch,

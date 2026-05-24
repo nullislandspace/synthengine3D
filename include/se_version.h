@@ -18,7 +18,7 @@
 // =====================================================================
 
 #define SE_VERSION_MAJOR 0
-#define SE_VERSION_MINOR 3
+#define SE_VERSION_MINOR 2
 #define SE_VERSION_PATCH 0
 
 // Returns the engine version as a static "MAJOR.MINOR.PATCH" string.
