@@ -1,0 +1,11 @@
+version: "0.0.0"
+description: >-
+  SynthEngine3D -- a reusable engine for Tanmatsu graceloader apps:
+  per-pixel z-buffer software 3D renderer, object/emit framework, audio
+  mixer + DSP + procedural music, Hershey vector text, data-driven UI
+  menus, and an NBT-backed save framework. Public, semver'd API under
+  include/; internals are free to change.
+# This manifest makes the component externally manageable later (move to
+# its own repo / registry and depend on it from graceloader). For now it
+# is vendored in this game's tree and consumed via add_subdirectory by the
+# plain-CMake build; see ../devdocs/engine-extraction.md.
