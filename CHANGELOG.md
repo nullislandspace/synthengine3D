@@ -74,6 +74,13 @@ not yet frozen — minor releases may still adjust the API as it settles toward
   through the note-on/off interface (the pad is now three voices — a chord —
   rather than one three-oscillator block; sonically equivalent by filter
   linearity, with the pad gain split across the three).
+- **Scene rasterizer: the depth buffer and per-pixel frame-stamp plane are
+  folded into one `uint32` cell** (`stamp << 16 | depth`). Halves the distinct
+  cache lines the per-pixel depth test touches (one combined array + the
+  framebuffer instead of separate depth and stamp planes) — a win on the
+  PSRAM-latency-bound rasterize hot loop. Output is byte-identical; the stamp
+  is now 16-bit (wraps every 65536 frames instead of 256). +~0.4 MB PSRAM for
+  the wider cell.
 
 ### Added
 - **`render_set_camera_6dof(x, y, z, yaw, pitch, roll)`** — position the eye

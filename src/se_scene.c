@@ -104,20 +104,24 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 
 // --- Buffers ------------------------------------------------------------------
 //
-// The depth buffer is never cleared. Instead a parallel 8-bit stamp
-// plane records, per pixel, the frame number that last wrote a depth
-// there. A depth value counts only when its stamp equals the current
-// frame; a stale stamp reads as "infinitely far". So every frame
-// starts with a logically-empty depth buffer for the cost of one
-// counter increment — no 768 KB memset — and depth traffic happens
-// only on pixels the 3D scene actually draws, not the whole screen.
+// Depth and the frame-stamp share ONE uint32 cell per pixel:
+//   high 16 bits = frame stamp,  low 16 bits = encoded 1/z depth.
+// Folding them halves the per-pixel cache-line touches in the rasterizer
+// (one combined array + the framebuffer, instead of separate depth and
+// stamp planes) — the dominant cost there is PSRAM access latency.
 //
-// The stamp is 8-bit, so it wraps every 256 frames; a pixel that an
-// obstacle covered, then went exactly a 256-frame multiple without
-// being touched, then was covered again, could mis-resolve for one
-// pixel for one frame. That is invisible in practice. Frame 0 is
-// skipped on wrap so an untouched (zero-initialised) stamp cell never
-// matches a live frame.
+// The depth buffer is never cleared. The stamp records the frame number
+// that last wrote a cell; a depth counts only when its stamp equals the
+// current frame, else it reads as "infinitely far". So every frame starts
+// with a logically-empty depth buffer for the cost of one counter
+// increment — no full-screen memset — and depth traffic happens only on
+// pixels the 3D scene actually draws, not the whole screen.
+//
+// The stamp is 16-bit, so it wraps every 65536 frames; a pixel covered,
+// then left untouched for exactly a 65536-frame multiple, then covered
+// again, could mis-resolve for one pixel for one frame. That is invisible
+// in practice. Frame 0 is skipped on wrap so an untouched (zero-init) cell
+// (stamp 0) never matches a live frame.
 
 #define SCENE_PIXELS  (DISPLAY_LOG_W * DISPLAY_RAW_STRIDE)
 
@@ -142,8 +146,7 @@ typedef struct {
     uint16_t    packed;
 } scene_seg_t;
 
-static uint16_t*    s_depth   = NULL;   // encoded 1/z, indexed like the fb
-static uint8_t*     s_stamp   = NULL;   // frame tag per pixel
+static uint32_t*    s_ds      = NULL;   // (stamp << 16) | depth, indexed like the fb
 static scene_tri_t* s_tris    = NULL;   // accumulated triangles (this frame)
 static int          s_tri_n   = 0;
 static scene_seg_t* s_lines   = NULL;   // accumulated wireframe edges
@@ -151,7 +154,7 @@ static int          s_line_n  = 0;
 
 static uint16_t*    s_fb      = NULL;
 static bool         s_rev     = false;
-static uint8_t      s_frame   = 0;      // current frame tag (never 0 while live)
+static uint16_t     s_frame   = 0;      // current frame tag (never 0 while live)
 
 // Rasterize diagnostics — counts (post-cull) + per-phase wallclock of the
 // most recent scene_rasterize(), reported by scene_raster_stats().
@@ -166,11 +169,10 @@ static int64_t      s_stat_line_us = 0;
 static se_scene_options_t s_opts = { false, false };
 
 void scene_init(void) {
-    // Depth + stamp planes are full-screen (SCENE_PIXELS each) — far too big
-    // for internal SRAM, and touched only during the rasterize pass, so they
-    // stay in PSRAM.
-    s_depth = heap_caps_malloc(SCENE_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    s_stamp = heap_caps_malloc(SCENE_PIXELS * sizeof(uint8_t),  MALLOC_CAP_SPIRAM);
+    // The combined depth+stamp plane is full-screen (SCENE_PIXELS uint32) —
+    // far too big for internal SRAM, and touched only during the rasterize
+    // pass, so it stays in PSRAM.
+    s_ds = heap_caps_malloc(SCENE_PIXELS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
 
     // The deferred geometry lists go in INTERNAL SRAM when they fit. The
     // emit + cull + order passes run on them while the PPA backdrop DMA
@@ -187,18 +189,18 @@ void scene_init(void) {
     bool const lines_internal = (s_lines != NULL);
     if (!s_lines) s_lines = heap_caps_malloc(lines_sz, MALLOC_CAP_SPIRAM);
 
-    if (!s_depth || !s_stamp || !s_tris || !s_lines) {
-        ESP_LOGE(TAG, "scene buffer allocation failed (depth=%p stamp=%p tris=%p lines=%p)",
-                 s_depth, s_stamp, s_tris, s_lines);
+    if (!s_ds || !s_tris || !s_lines) {
+        ESP_LOGE(TAG, "scene buffer allocation failed (ds=%p tris=%p lines=%p)",
+                 s_ds, s_tris, s_lines);
         return;
     }
     ESP_LOGI(TAG, "geometry lists: tris=%s (%uKB) lines=%s (%uKB)",
              tris_internal  ? "INTERNAL" : "PSRAM", (unsigned)(tris_sz  / 1024),
              lines_internal ? "INTERNAL" : "PSRAM", (unsigned)(lines_sz / 1024));
-    // One-time stamp clear so no garbage cell matches the first
-    // live frame tag (1). The depth buffer needs no init — a cell is
-    // only ever read after its stamp says it was written this frame.
-    memset(s_stamp, 0, SCENE_PIXELS * sizeof(uint8_t));
+    // One-time clear so no garbage cell's stamp matches the first live frame
+    // tag (1). Zeroing the whole cell also zeroes its depth, but depth is
+    // only ever read after the stamp says it was written this frame.
+    memset(s_ds, 0, SCENE_PIXELS * sizeof(uint32_t));
 }
 
 void scene_begin(pax_buf_t* fb) {
@@ -244,23 +246,24 @@ static inline void scene_vrun(int lx, int y_top, int y_bot,
     if (y_bot >= DISPLAY_LOG_H) y_bot = DISPLAY_LOG_H - 1;
     if (y_top > y_bot) return;
 
-    uint8_t const frame = s_frame;
+    uint16_t const frame = s_frame;
+    uint32_t const fhi   = (uint32_t)frame << 16;   // stamp pre-shifted for the store
     int const idx = direct_565_logical_index(lx, y_top);
-    uint16_t* fp  = s_fb    + idx;
-    uint16_t* zp  = s_depth + idx;
-    uint8_t*  sp  = s_stamp + idx;
+    uint16_t* fp  = s_fb + idx;
+    uint32_t* dp  = s_ds + idx;
     float     d   = As * (float)lx + Bs * (float)y_top + Cs;
     int       cnt = y_bot - y_top + 1;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;                      // sub-pixel edge overshoot guard
-        uint16_t const stored = (*sp == frame) ? *zp : 0;
+        uint32_t const cell   = *dp;
+        // Stale stamp (≠ this frame) reads as depth 0 (infinitely far).
+        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
         if ((uint16_t)di > stored) {
-            *zp = (uint16_t)di;
-            *sp = frame;
+            *dp = fhi | (uint16_t)di;
             *fp = packed;
         }
-        fp--; zp--; sp--;
+        fp--; dp--;
         d += Bs;
     }
 }
@@ -349,14 +352,13 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     float       d     = eda;
     float const dd    = (steps > 0) ? (edb - eda) / (float)steps : 0.0f;
 
-    uint8_t const frame  = s_frame;
+    uint16_t const frame = s_frame;
     int     const ptr_dx = (sx > 0) ? DISPLAY_RAW_STRIDE : -DISPLAY_RAW_STRIDE;
     int     const ptr_dy = (sy > 0) ? -1 : 1;
 
     int const idx = direct_565_logical_index(x0, y0);
-    uint16_t* fp  = s_fb    + idx;
-    uint16_t* zp  = s_depth + idx;
-    uint8_t*  sp  = s_stamp + idx;
+    uint16_t* fp  = s_fb + idx;
+    uint32_t* dp  = s_ds + idx;
     int       lx  = x0;
     int       ly  = y0;
 
@@ -364,13 +366,14 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
         if (lx >= 0 && lx < DISPLAY_LOG_W && ly >= 0 && ly < DISPLAY_LOG_H) {
             int di = (int)d;
             if (di < 0) di = 0;
-            uint16_t const stored = (*sp == frame) ? *zp : 0;
-            if ((uint16_t)di >= stored) *fp = packed;
+            uint32_t const cell   = *dp;
+            uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+            if ((uint16_t)di >= stored) *fp = packed;   // edges test depth but never write it
         }
         if (lx == x1 && ly == y1) break;
         int const e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; zp += ptr_dx; sp += ptr_dx; }
-        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; zp += ptr_dy; sp += ptr_dy; }
+        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; dp += ptr_dx; }
+        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; dp += ptr_dy; }
         d += dd;
     }
 }
