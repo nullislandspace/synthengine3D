@@ -13,6 +13,7 @@
 #include "bsp/display.h"
 #include "bsp/input.h"
 #include "bsp/led.h"
+#include "gl_input.h"
 #include "esp_log.h"
 #include "nvs_settings_hardware.h"
 #include "se_config.h"   // SE_HW_DISPLAY_BRIGHTNESS_MIN
@@ -102,7 +103,7 @@ esp_err_t se_hw_init(void) {
 
     // ---- Audio: read initial jack state, then apply ----
     bool inserted = false;
-    esp_err_t err = bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &inserted);
+    esp_err_t err = gl_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &inserted);
     if (err == ESP_OK) {
         s_jack_inserted = inserted;
     } else {

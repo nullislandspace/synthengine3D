@@ -27,7 +27,8 @@
 
 #include "bsp/device.h"
 #include "bsp/display.h"
-#include "bsp/input.h"   // bsp_input_get_queue, event/key enums
+#include "bsp/input.h"   // event/key enums + types
+#include "gl_input.h"    // gl_input_get_queue (USB + native merged)
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -242,7 +243,7 @@ static bool se_bootstrap(void) {
     bsp_configuration_t const bsp_configuration = {
         .display =
             {
-                .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
+                .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_16_565RGB,
                 .num_fbs                = 1,
             },
     };
@@ -253,8 +254,8 @@ static bool se_bootstrap(void) {
     }
 
     size_t                        h_res = 0, v_res = 0;
-    lcd_color_rgb_pixel_format_t  color_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
-    lcd_rgb_data_endian_t         data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
+    bsp_display_color_format_t    color_format = BSP_DISPLAY_COLOR_FORMAT_24_888RGB;
+    bsp_display_endianness_t      data_endian  = BSP_DISPLAY_ENDIAN_LITTLE;
     res = bsp_display_get_parameters(&h_res, &v_res, &color_format, &data_endian);
     if (res != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get display parameters: %d", res);
@@ -263,8 +264,8 @@ static bool se_bootstrap(void) {
 
     pax_buf_type_t format = PAX_BUF_24_888RGB;
     switch (color_format) {
-        case LCD_COLOR_PIXEL_FORMAT_RGB565: format = PAX_BUF_16_565RGB; break;
-        case LCD_COLOR_PIXEL_FORMAT_RGB888: format = PAX_BUF_24_888RGB; break;
+        case BSP_DISPLAY_COLOR_FORMAT_16_565RGB: format = PAX_BUF_16_565RGB; break;
+        case BSP_DISPLAY_COLOR_FORMAT_24_888RGB: format = PAX_BUF_24_888RGB; break;
         default: break;
     }
 
@@ -280,7 +281,7 @@ static bool se_bootstrap(void) {
     s_di.width       = h_res;
     s_di.height      = v_res;
     s_di.pax_format  = format;
-    s_di.reversed    = (data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    s_di.reversed    = (data_endian == BSP_DISPLAY_ENDIAN_BIG);
     s_di.orientation = orientation;
 
     // Two PSRAM framebuffers, PPA/DMA-aligned, each wrapped in a pax_buf_t
@@ -321,9 +322,11 @@ static bool se_bootstrap(void) {
     se_hw_init();
 
     // Input event queue (drained each frame by se_pump_input).
-    res = bsp_input_get_queue(&s_input_queue);
+    // gl_input_get_queue returns the same queue as bsp_input_get_queue
+    // but the graceloader also feeds it from any plugged-in USB keyboard.
+    res = gl_input_get_queue(&s_input_queue);
     if (res != ESP_OK) {
-        ESP_LOGW(TAG, "bsp_input_get_queue failed: %d -- input will be dead", res);
+        ESP_LOGW(TAG, "gl_input_get_queue failed: %d -- input will be dead", res);
         s_input_queue = NULL;
     }
 

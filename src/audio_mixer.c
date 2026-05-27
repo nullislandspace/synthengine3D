@@ -5,6 +5,7 @@
 
 #include "bsp/audio.h"
 #include "bsp/input.h"
+#include "gl_input.h"
 #include "driver/i2s_common.h"
 #include "driver/i2s_types.h"
 #include "esp_log.h"
@@ -97,7 +98,7 @@ static void power_up(void) {
     }
 
     bool jack_inserted = false;
-    if (bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &jack_inserted) != ESP_OK) {
+    if (gl_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &jack_inserted) != ESP_OK) {
         jack_inserted = false;
     }
     bsp_audio_set_amplifier(!jack_inserted);
@@ -315,7 +316,7 @@ esp_err_t audio_mixer_init(void) {
     // are inserted. hw_settings_init() will overwrite the volume
     // value with the launcher-persisted one immediately after.
     bool jack = false;
-    if (bsp_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &jack) != ESP_OK) jack = false;
+    if (gl_input_read_action(BSP_INPUT_ACTION_TYPE_AUDIO_JACK, &jack) != ESP_OK) jack = false;
     err = bsp_audio_set_amplifier(!jack);
     ESP_LOGI(TAG, "initial amp policy: jack=%s amp=%s err=%d",
              jack ? "in" : "out", jack ? "off" : "on", err);
