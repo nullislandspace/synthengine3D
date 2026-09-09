@@ -19,6 +19,39 @@ not yet frozen — minor releases may still adjust the API as it settles toward
 > Committed but not yet assigned a version number. These changes sit on top of
 > 0.2.0 until a release version is chosen.
 
+### Added — pluggable renderers + `SE_RENDER_RAYCAST`
+
+- **`scene_render()` / `scene_prepare()` / `scene_rasterize()` now dispatch on
+  their `mode` argument** (it was accepted and ignored). Existing calls passing
+  `SE_RENDER_ZBUFFER` are unaffected — same renderer, same output.
+- **`SE_RENDER_RAYCAST`** — a second built-in renderer. Bins the projected
+  triangles into 16x16 screen tiles, then casts one primary ray per pixel of a
+  non-empty tile and writes each pixel **at most once**. A ray that hits
+  nothing writes neither colour nor depth, so an existing backdrop shows
+  through untouched, exactly as with the rasterizer.
+
+  It renders the **same image** as `SE_RENDER_ZBUFFER`: for primary rays
+  through a pinhole camera, "the ray through pixel p hits triangle T first" is
+  precisely "p is inside T's projection and T holds the largest 1/z there" —
+  the depth test. It therefore needs no world-space geometry and casts against
+  the already-projected `(sx, sy, w)` triangles.
+
+  The two differ only in cost, and in opposite directions: the z-buffer is
+  primitive-driven and pays per covered pixel **per triangle** (overdraw); the
+  raycaster is pixel-driven and pays per pixel of a **non-empty tile**,
+  independent of depth complexity. Sparse scenes favour the z-buffer, dense
+  high-overdraw scenes favour the raycaster. **Measure — do not assume:**
+  Race the Synth's normal play (~400 triangles over 800x480) is sparse, and
+  measures 12.6-22.4 ms z-buffer vs 60.9 ms raycast.
+- **`se_renderer_register()` / `se_renderer_t` / `se_renderer_name()`** — a game
+  can register its own renderer and select it exactly like a built-in, without
+  changing any `scene_tri` / `scene_line` call site. The engine's cull / order
+  passes run before a custom renderer's `prepare()`, so it inherits them.
+- **`se_scene_geometry()`** and the now-public `se_vtx_t` / `se_tri_t` /
+  `se_seg_t` — the per-frame projected geometry and render targets a custom
+  renderer needs. (These structs were previously private to `se_scene.c`;
+  publishing them is an addition, not a change — no existing field moved.)
+
 ### Changed (breaking — allowed pre-1.0)
 - **`render_camera_t` is now a full 6-DOF pose:** `{ x, y, z, yaw, pitch,
   roll }` (was `{ x, y }`). The two leading fields are unchanged, so code

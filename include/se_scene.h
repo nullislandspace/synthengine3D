@@ -47,13 +47,48 @@
 // OFF, so the renderer is byte-identical to the old hybrid-immediate
 // pipeline until a game enables them.
 
-// Which rasterization algorithm scene_render() uses. Only the per-pixel
-// z-buffer ships today; the enum exists so a game can select a different
-// pipeline later (painter's, tiled, ...) with no change to its submit
-// calls. SE_RENDER_DEFAULT is the engine's recommended choice.
+// Which algorithm scene_render() uses to resolve the frame. Selected per
+// call, so a game can switch renderers live (between frames) or pick a
+// different one per screen. Both built-ins consume the SAME submitted
+// geometry and produce the SAME image -- they differ only in loop order
+// and therefore in what they cost:
+//
+//   SE_RENDER_ZBUFFER  primitive-driven. Walks triangles, and for each
+//                      one walks the pixels it covers, depth-testing per
+//                      pixel. Cost scales with the summed triangle AREA,
+//                      i.e. covered pixels x overdraw: a pixel under N
+//                      overlapping triangles is visited N times.
+//
+//   SE_RENDER_RAYCAST  pixel-driven. Bins triangles into screen tiles,
+//                      then for each pixel of a non-empty tile casts one
+//                      primary ray, keeps the nearest hit, and writes the
+//                      pixel ONCE. Cost is independent of overdraw, but it
+//                      pays edge tests on every pixel of a non-empty tile,
+//                      including ones the ray misses.
+//
+// Neither is universally faster -- the crossover depends on the scene's
+// overdraw and how tightly its geometry packs into tiles, so a game (or a
+// different game reusing the engine) should measure both with
+// scene_raster_stats(). SE_RENDER_DEFAULT is the safe general choice.
+//
+// Why the two agree pixel-for-pixel: for PRIMARY rays through a pinhole
+// camera, "the ray through pixel p hits triangle T first" is exactly "p is
+// inside T's projection and T holds the largest 1/z there" -- which is what
+// the depth test computes. So the raycaster is a reordering of the same
+// visible-surface problem, not a different one, and it needs no world-space
+// geometry: it casts against the projected (sx, sy, w) triangles. A ray that
+// hits nothing writes no pixel, so whatever the game already painted (a
+// backdrop, a PPA composite) shows through untouched -- identical to the
+// rasterizer, which only touches covered pixels.
+//
+// Values above SE_RENDER_BUILTIN_COUNT are handles returned by
+// se_renderer_register() (see below).
 typedef enum {
     SE_RENDER_ZBUFFER = 0,           // per-pixel reciprocal-z depth test
+    SE_RENDER_RAYCAST = 1,           // tiled primary-ray cast, zero overdraw
     SE_RENDER_DEFAULT = SE_RENDER_ZBUFFER,
+    SE_RENDER_BUILTIN_COUNT = 2,     // first handle se_renderer_register() hands out
+    SE_RENDER_MAX = 8,               // renderer table size (built-ins + custom)
 } se_render_mode_t;
 
 // Allocate the depth buffer, frame-stamp plane and the deferred triangle
@@ -173,3 +208,91 @@ typedef struct {
 // one pass independently is a get-modify-set on the returned struct.
 void               scene_set_options(se_scene_options_t const* opts);
 se_scene_options_t scene_get_options(void);
+
+// --- Pluggable renderers ---------------------------------------------
+//
+// The two built-ins are just the two renderers the engine ships with;
+// the pipeline itself is a seam. A game can register its own renderer
+// and select it exactly like a built-in, which is the point of the
+// engine being reusable: a different game with different geometry (or a
+// different visual style -- cel shading, dithering, a depth-cued fog
+// pass) can replace the resolve step without touching a single
+// scene_tri / scene_line call site.
+//
+// A renderer is two callbacks mirroring scene_prepare / scene_rasterize:
+//
+//   prepare()    Geometry-only. May reorder, compact or index the
+//                deferred lists, and build whatever acceleration
+//                structure it needs. MUST NOT touch framebuffer pixels
+//                -- the game is allowed to run this concurrently with a
+//                hardware blit that is writing the framebuffer.
+//   rasterize()  Paints. Runs after any such blit has completed.
+//
+// Both receive the `user` pointer given at registration. The engine's
+// own cull / order passes (scene_set_options) run BEFORE prepare(), so a
+// custom renderer inherits them for free and sees an already-culled list.
+typedef struct {
+    char const* name;                  // for logs / debug UI; not copied
+    void      (*prepare)(void* user);  // geometry only, no pixels
+    void      (*rasterize)(void* user);// paints
+    void*       user;
+} se_renderer_t;
+
+// Register a renderer and get the handle to pass to scene_render() /
+// scene_prepare() / scene_rasterize(). Returns SE_RENDER_DEFAULT if the
+// table is full or `r` is malformed (both callbacks are required), so a
+// caller that ignores the result still renders something sane. The
+// se_renderer_t is copied; the name string and user pointer are not.
+se_render_mode_t se_renderer_register(se_renderer_t const* r);
+
+// Human-readable name of a renderer, for debug overlays and logs.
+// Returns "?" for a handle that was never registered.
+char const* se_renderer_name(se_render_mode_t mode);
+
+// --- Geometry view (for custom renderers) ----------------------------
+//
+// What a renderer gets to work with. These are the projected, culled and
+// (optionally) depth-ordered primitives for the current frame, plus the
+// targets to resolve them into. Only meaningful inside a renderer's
+// prepare() / rasterize() callback.
+//
+// Vertices are already in screen space: sx / sy in pax logical pixels and
+// w = 1/z (LARGER IS NEARER), the quantity that interpolates linearly
+// across a projected triangle. A renderer that wants encoded depth
+// multiplies w by `depth_scale`.
+//
+// The depth plane is one uint32 per pixel, (frame_stamp << 16) | depth,
+// indexed exactly like `fb` via direct_565_logical_index() from
+// se_direct565.h. A cell counts only if its high half equals `frame`;
+// anything else is a stale cell from an earlier frame and must read as
+// infinitely far. This is what lets the engine skip clearing the depth
+// buffer -- do not memset it, and do not assume it is zero.
+typedef struct {
+    float sx, sy, w;   // screen x/y (logical px) + 1/z depth
+} se_vtx_t;
+
+typedef struct {
+    se_vtx_t v[3];
+    uint16_t packed;   // RGB565, framebuffer-endian; write straight to fb
+} se_tri_t;
+
+typedef struct {
+    se_vtx_t v[2];
+    uint16_t packed;
+} se_seg_t;
+
+typedef struct {
+    se_tri_t const* tris;        // triangles for this frame (post-cull)
+    int             tri_n;
+    se_seg_t const* segs;        // wireframe edges (drawn after triangles)
+    int             seg_n;
+    uint16_t*       fb;          // RGB565 framebuffer
+    uint32_t*       depth;       // (stamp << 16) | depth, indexed like fb
+    uint16_t        frame;       // current frame stamp
+    float           depth_scale; // multiply a vertex w by this to encode
+} se_geometry_t;
+
+// Snapshot the current frame's geometry + targets. Call from inside a
+// renderer callback; the pointers are owned by the engine and stay valid
+// only for that call.
+se_geometry_t se_scene_geometry(void);
