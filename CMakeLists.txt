@@ -20,6 +20,7 @@ set(SE_SRCS
     src/audio_mixer.c      # E2: software mixer + I2S, group-gated output
     src/se_voice.c         # E2: pluggable synth voices (built-in subtractive/noise)
     src/music_procedural.c # E2: procedural music source
+    src/se_mp3.c           # E2: MP3 music source (minimp3, vendored)
     src/nbt.c              # E3: NBT serialization primitive
     src/se_save.c          # E3: file-backed save-slot framework
     src/se_scene.c         # E4: z-buffer rasterizer + camera + projection

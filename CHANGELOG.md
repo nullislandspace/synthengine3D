@@ -16,7 +16,34 @@ stays internal and may change at any patch release.
 
 ## [Unreleased]
 
-> Nothing yet since 1.0.0.
+> Additive public API on top of 1.0.0. Releasing this would be **1.1.0**
+> under the contract above (MINOR = backwards-compatible additions);
+> `se_version.h` still says 1.0.0 until that release is cut.
+
+### Added — `se_mp3.h` (MP3 music source)
+
+- **`se_mp3_create(cfg)`** returns a `music_source_t` that plays `*.mp3` from
+  a directory (default `/sd/music`), so a game can offer the player's own
+  music as an alternative to the procedural generator by handing it to the
+  same `audio_mixer_set_music()`. The mixer neither knows nor cares which
+  source it holds. Plus `se_mp3_track_count()`, `se_mp3_track_name()`,
+  `se_mp3_skip()`, and `se_mp3_config_t` (directory, shuffle, loop).
+- Decoding is **minimp3** (public domain), vendored at `src/internal/minimp3.h`.
+- **How it satisfies the mixer contract.** `se_audio_source.h` forbids blocking
+  in `render()` — no file I/O, no waits — and fixes the format at 22050 Hz
+  stereo; an MP3 is on the SD card and usually 44.1 kHz, so it meets neither.
+  A decoder task therefore reads, decodes, resamples and fills a lock-free
+  SPSC ring buffer, and `render()` only drains it — a bounded copy that never
+  touches the filesystem. If the decoder falls behind, `render()` emits
+  silence for the shortfall rather than stalling the mixer.
+- Returns NULL (having logged why) when the directory is missing or empty, so
+  a game can fall back to its existing music instead of going silent.
+- **Not free**, unlike a procedural source: a 32 KB decoder-task stack
+  (minimp3 is stack-hungry), a ~64 KB PCM ring and 16 KB read buffer in PSRAM,
+  the `mp3dec_t` state in internal SRAM (it is touched per frame), and the CPU
+  to decode. The task is pinned to the mixer's core below the mixer's
+  priority, so it yields to audio.
+
 
 ## [1.0.0] — 2026-09-09
 

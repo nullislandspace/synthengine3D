@@ -21,6 +21,7 @@
 #include "se_audio.h"           // E2  -- software mixer
 #include "se_voice.h"           // E2  -- pluggable synth voices (built-in + custom)
 #include "se_music_procedural.h"// E2  -- procedural music source
+#include "se_mp3.h"             // E2  -- MP3 music source (files -> mixer)
 #include "se_nbt.h"             // E3  -- NBT serialization primitive
 #include "se_save.h"            // E3  -- file-backed save-slot framework
 #include "se_scene.h"           // E4  -- 3D scene renderer + camera + projection

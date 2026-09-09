@@ -67,7 +67,7 @@ static char const TAG[] = "se_splash";
 
 // How long the wordmark sits still after the zoom finishes, in seconds.
 // The zoom duration is the caller's `seconds`; this is added on top.
-#define SPLASH_HOLD_SECONDS 1.0f
+#define SPLASH_HOLD_SECONDS 2.0f
 
 // Block geometry for the title, in font units (cap height is 21, so a
 // half-extent of 1.6 puts roughly six blocks across a capital letter).
