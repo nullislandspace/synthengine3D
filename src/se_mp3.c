@@ -58,12 +58,25 @@ static char const TAG[] = "se_mp3";
 #define MP3_REFILL_BELOW    (2 * 1024)
 
 // minimp3 is stack-hungry: the plugin this was derived from measured
-// >16 KB. Stack is in words for xTaskCreate.
-#define MP3_TASK_STACK_WORDS (8 * 1024)          // 32 KB
+// >16 KB, and a crash dump here showed ~21 KB in use. NOTE: ESP-IDF's
+// xTaskCreate takes the stack size in BYTES, not in StackType_t words as
+// vanilla FreeRTOS does -- passing a word count silently yields a stack a
+// quarter of the intended size, which fails as a stack-protection panic
+// only once a real file is decoded.
+#define MP3_TASK_STACK_BYTES (32 * 1024)
 // Below the mixer (configMAX_PRIORITIES - 2) so audio always wins, and on
 // the mixer's core so the game's render loop on core 0 stays clear.
 #define MP3_TASK_PRIORITY    (configMAX_PRIORITIES - 4)
 #define MP3_TASK_CORE        1
+
+// Decoder scratch, heap-allocated together so none of it sits on the task
+// stack: mp3dec_t is several KB of MDCT/QMF state and one PCM frame is
+// another 4.6 KB. Both are touched per frame, so this lives in internal
+// SRAM when it can -- PSRAM would add a cache miss to every frame.
+typedef struct {
+    mp3dec_t dec;
+    int16_t  pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+} mp3_scratch_t;
 
 typedef struct {
     music_source_t base;          // MUST be first: we cast between them
@@ -258,7 +271,7 @@ static void playlist_advance(se_mp3_t* m) {
 // ---- decoder task ---------------------------------------------------
 
 // Decode one track start to finish, pushing resampled PCM into the ring.
-static void decode_track(se_mp3_t* m, mp3dec_t* dec) {
+static void decode_track(se_mp3_t* m, mp3_scratch_t* sc) {
     char path[96 + MP3_NAME_MAX + 2];
     snprintf(path, sizeof path, "%s/%s", m->dir, m->tracks[m->cur]);
 
@@ -270,12 +283,12 @@ static void decode_track(se_mp3_t* m, mp3dec_t* dec) {
     }
     ESP_LOGI(TAG, "playing %s", m->tracks[m->cur]);
 
-    mp3dec_init(dec);
+    mp3dec_init(&sc->dec);
     rs_reset(m, AUDIO_SAMPLE_RATE_HZ);   // replaced by the first frame's rate
 
     size_t   fill = 0, pos = 0;
     bool     eof = false, rate_known = false;
-    int16_t  pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    int16_t* const pcm = sc->pcm;
 
     while (!m->stop && !m->skip) {
         // Top the read buffer up when the unread tail runs low.
@@ -295,7 +308,7 @@ static void decode_track(se_mp3_t* m, mp3dec_t* dec) {
         if ((fill - pos) == 0) break;   // consumed everything
 
         mp3dec_frame_info_t info;
-        int const frames = mp3dec_decode_frame(dec, m->read_buf + pos,
+        int const frames = mp3dec_decode_frame(&sc->dec, m->read_buf + pos,
                                                (int)(fill - pos), pcm, &info);
         if (info.frame_bytes <= 0) break;         // not resyncable
         pos += (size_t)info.frame_bytes;
@@ -318,13 +331,9 @@ static void decode_track(se_mp3_t* m, mp3dec_t* dec) {
 
 static void mp3_task(void* arg) {
     se_mp3_t* const m = (se_mp3_t*)arg;
-    // mp3dec_t is several KB of MDCT overlap and QMF state, touched
-    // constantly by the synthesis filter -- keep it in internal SRAM, not
-    // PSRAM, or every decoded frame pays cache-miss latency. Too big for
-    // this task's stack, so it is heap-allocated once here.
-    mp3dec_t* dec = heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_INTERNAL);
-    if (dec == NULL) dec = heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_SPIRAM);
-    if (dec == NULL) {
+    mp3_scratch_t* sc = heap_caps_malloc(sizeof(mp3_scratch_t), MALLOC_CAP_INTERNAL);
+    if (sc == NULL) sc = heap_caps_malloc(sizeof(mp3_scratch_t), MALLOC_CAP_SPIRAM);
+    if (sc == NULL) {
         ESP_LOGE(TAG, "no memory for the decoder");
         m->task_done = true;
         vTaskDelete(NULL);
@@ -333,7 +342,7 @@ static void mp3_task(void* arg) {
 
     while (!m->stop) {
         m->skip = false;
-        decode_track(m, dec);
+        decode_track(m, sc);
         if (m->stop) break;
         bool const was_last = (m->cur == m->n_tracks - 1);
         playlist_advance(m);
@@ -343,7 +352,7 @@ static void mp3_task(void* arg) {
         }
     }
 
-    free(dec);
+    free(sc);
     m->task_done = true;
     vTaskDelete(NULL);
 }
@@ -415,11 +424,11 @@ music_source_t* se_mp3_create(se_mp3_config_t const* cfg) {
     m->base.shutdown = mp3_shutdown;
 
     BaseType_t const ok = xTaskCreatePinnedToCore(
-        mp3_task, "se_mp3", MP3_TASK_STACK_WORDS, m,
+        mp3_task, "se_mp3", MP3_TASK_STACK_BYTES, m,
         MP3_TASK_PRIORITY, &m->task, MP3_TASK_CORE);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "could not start the decoder task (needs %u KB of stack)",
-                 (unsigned)(MP3_TASK_STACK_WORDS * sizeof(StackType_t) / 1024));
+                 (unsigned)(MP3_TASK_STACK_BYTES / 1024));
         free(m->ring); free(m->read_buf); free(m->tracks); free(m);
         return NULL;
     }
