@@ -20,7 +20,7 @@
 
 #include "se_mp3.h"
 
-#include <dirent.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +30,7 @@
 #include "freertos/task.h"
 
 #include "fastopen.h"       // DMA-friendly stdio for /sd (see se_save.c)
+#include "ff.h"             // FatFs -- see playlist_scan() for why, not dirent
 
 // minimp3, vendored (public domain). ONLY_MP3 drops MP1/MP2 tables we
 // never decode; NO_SIMD because its SIMD paths are x86/ARM only.
@@ -154,6 +155,17 @@ static void rs_feed(se_mp3_t* m, int16_t l, int16_t r) {
 
 // ---- playlist -------------------------------------------------------
 
+// Case-insensitive compare. graceloader's ABI exports strcmp/strncmp and
+// tolower, but not strcasecmp, so this is spelled out rather than linked.
+static int ci_cmp(char const* a, char const* b) {
+    for (;;) {
+        int const ca = tolower((unsigned char)*a++);
+        int const cb = tolower((unsigned char)*b++);
+        if (ca != cb) return ca - cb;
+        if (ca == 0)  return 0;
+    }
+}
+
 static bool has_mp3_ext(char const* name) {
     size_t const n = strlen(name);
     if (n < 5) return false;
@@ -165,26 +177,65 @@ static bool has_mp3_ext(char const* name) {
 }
 
 static int name_cmp(void const* a, void const* b) {
-    return strcasecmp((char const*)a, (char const*)b);
+    return ci_cmp((char const*)a, (char const*)b);
+}
+
+// Open a directory through FatFs.
+//
+// Why not opendir(): graceloader's ABI exports FatFs (f_opendir / f_readdir /
+// f_closedir) but NOT the POSIX dirent wrappers. An app that calls opendir
+// links fine and then fails to LOAD, because the symbol cannot be resolved --
+// so this has to go through FatFs even though the rest of the file happily
+// uses stdio (fopen/fread ARE exported).
+//
+// FatFs paths are volume-relative and carry no VFS mount point, so the
+// "/sd/music" a caller passes is not a FatFs path. Rather than hard-code a
+// mapping that would silently break if the mount changed, try the plausible
+// spellings and keep whichever opens.
+static bool dir_open(FF_DIR* dp, char const* vfs_dir, char* used, size_t used_sz) {
+    char const* rel = vfs_dir;
+    if      (strncmp(vfs_dir, "/sd",  3) == 0) rel = vfs_dir + 3;
+    else if (strncmp(vfs_dir, "/int", 4) == 0) rel = vfs_dir + 4;
+    if (*rel == '\0') rel = "/";
+
+    char cand[128];
+    for (int i = 0; i < 4; i++) {
+        switch (i) {
+            case 0:  snprintf(cand, sizeof cand, "%s",   rel);     break;
+            case 1:  snprintf(cand, sizeof cand, "0:%s", rel);     break;
+            case 2:  snprintf(cand, sizeof cand, "1:%s", rel);     break;
+            default: snprintf(cand, sizeof cand, "%s",   vfs_dir); break;
+        }
+        if (f_opendir(dp, cand) == FR_OK) {
+            snprintf(used, used_sz, "%s", cand);
+            return true;
+        }
+    }
+    return false;
 }
 
 // Scan `dir` for *.mp3. Returns the count (0 = nothing usable).
 static int playlist_scan(se_mp3_t* m) {
-    DIR* d = opendir(m->dir);
-    if (d == NULL) {
-        ESP_LOGW(TAG, "cannot open %s", m->dir);
+    FF_DIR d;
+    char   opened[128];
+    if (!dir_open(&d, m->dir, opened, sizeof opened)) {
+        ESP_LOGW(TAG, "cannot open %s (tried FatFs volume-relative forms)", m->dir);
         return 0;
     }
-    int n = 0;
-    struct dirent* e;
-    while (n < MP3_MAX_TRACKS && (e = readdir(d)) != NULL) {
-        if (!has_mp3_ext(e->d_name)) continue;
-        if (strlen(e->d_name) >= MP3_NAME_MAX) continue;
-        strcpy(m->tracks[n], e->d_name);
+    ESP_LOGI(TAG, "scanning %s (FatFs path %s)", m->dir, opened);
+
+    int      n = 0;
+    FILINFO  fno;
+    while (n < MP3_MAX_TRACKS && f_readdir(&d, &fno) == FR_OK && fno.fname[0] != 0) {
+        if (fno.fattrib & AM_DIR) continue;
+        if (!has_mp3_ext(fno.fname)) continue;
+        if (strlen(fno.fname) >= MP3_NAME_MAX) continue;
+        strcpy(m->tracks[n], fno.fname);
         n++;
     }
-    closedir(d);
-    // readdir order is filesystem order; sort so playback is predictable.
+    f_closedir(&d);
+    // Directory order is whatever the filesystem gives; sort so playback
+    // order is predictable and matches what the player sees on a PC.
     if (n > 1) qsort(m->tracks, (size_t)n, MP3_NAME_MAX, name_cmp);
     return n;
 }
