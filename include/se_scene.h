@@ -176,6 +176,44 @@ render_camera_t render_camera(void);
 // shadow.)
 void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_sy);
 
+// --- Viewport ---------------------------------------------------------
+//
+// Restrict every pixel the scene writes to a rectangle. Triangles, edges
+// and the depth plane are all clipped to it, and the frustum-cull pass
+// (scene_set_options) culls against it rather than against the whole
+// screen, so a smaller viewport tightens culling for free.
+//
+// This is for a game that frames its 3D view inside a fixed border -- a
+// cockpit surround, a letterbox, a split screen, a dashboard along the
+// bottom. Without it, drawing the whole screen and then painting the
+// border over the top pays the fill twice: once to rasterize pixels
+// nobody will ever see, and again to cover them. Those pixels are
+// usually the expensive ones, too -- a dashboard sits over the nearest,
+// most overdrawn band of a ground-plane scene.
+//
+// Coordinates are pax LOGICAL pixels, the same space scene_tri projects
+// into, and the rect is clamped to the framebuffer, so an oversized or
+// partly-negative one is safe. An empty or inverted rect collapses to a
+// single pixel: the frame goes blank, which is diagnosable, rather than
+// silently drawing nothing or everything.
+//
+// Defaults to the whole framebuffer; passing NULL restores that. It is a
+// persistent setting, NOT reset by scene_begin() -- how a game frames its
+// view is a property of the game, not of the frame.
+//
+// The viewport clips; it does not scale or re-centre. The projection is
+// still the RENDER_* pinhole about RENDER_HALF_W / RENDER_HORIZON_Y, so
+// a viewport that is not centred on those shows an off-centre crop of
+// the same image rather than a re-framed one. A game that wants the
+// vanishing point inside its window moves it with the RENDER_* overrides
+// in se_config.h.
+typedef struct {
+    int x, y, w, h;   // logical pixels; w/h are sizes, not far edges
+} se_viewport_t;
+
+void          scene_set_viewport(se_viewport_t const* vp);
+se_viewport_t scene_viewport(void);
+
 // --- Optional render passes ------------------------------------------
 //
 // Two opt-in optimizations scene_render() can run before rasterizing.

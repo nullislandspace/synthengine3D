@@ -224,6 +224,48 @@ static inline void scene_project_cam(float cx, float cy, float cz, scene_vtx_t* 
     out->w  = inv_z;
 }
 
+// --- Viewport -----------------------------------------------------------------
+//
+// The inclusive pixel rectangle every rasterizer in this file is allowed
+// to touch. Defaults to the whole framebuffer, which reproduces the
+// pre-viewport engine exactly. Deliberately NOT reset by scene_begin():
+// it is a persistent property of how the game frames its 3D view, like
+// the projection, not a per-frame one.
+static int s_vp_x0 = 0;
+static int s_vp_y0 = 0;
+static int s_vp_x1 = DISPLAY_LOG_W - 1;
+static int s_vp_y1 = DISPLAY_LOG_H - 1;
+
+void scene_set_viewport(se_viewport_t const* vp) {
+    if (vp == NULL) {
+        s_vp_x0 = 0;
+        s_vp_y0 = 0;
+        s_vp_x1 = DISPLAY_LOG_W - 1;
+        s_vp_y1 = DISPLAY_LOG_H - 1;
+        return;
+    }
+    int x0 = vp->x, y0 = vp->y;
+    int x1 = vp->x + vp->w - 1, y1 = vp->y + vp->h - 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > DISPLAY_LOG_W - 1) x1 = DISPLAY_LOG_W - 1;
+    if (y1 > DISPLAY_LOG_H - 1) y1 = DISPLAY_LOG_H - 1;
+    // An empty or inverted rect would make every bound test fail in ways
+    // that are hard to read at a call site. Collapse it to a single pixel
+    // instead: the frame goes blank, which is a visible, diagnosable
+    // symptom rather than a silent corruption.
+    if (x1 < x0) x1 = x0;
+    if (y1 < y0) y1 = y0;
+    s_vp_x0 = x0;
+    s_vp_y0 = y0;
+    s_vp_x1 = x1;
+    s_vp_y1 = y1;
+}
+
+se_viewport_t scene_viewport(void) {
+    return (se_viewport_t){.x = s_vp_x0, .y = s_vp_y0, .w = s_vp_x1 - s_vp_x0 + 1, .h = s_vp_y1 - s_vp_y0 + 1};
+}
+
 // --- Triangle rasterizer ------------------------------------------------------
 
 // Fill one vertical run (logical x fixed) with a per-pixel depth
@@ -234,9 +276,9 @@ static inline void scene_project_cam(float cx, float cy, float cz, scene_vtx_t* 
 // the fb / depth / stamp indices alike.
 static inline void scene_vrun(int lx, int y_top, int y_bot,
                               float As, float Bs, float Cs, uint16_t packed) {
-    if (lx < 0 || lx >= DISPLAY_LOG_W) return;
-    if (y_top < 0)              y_top = 0;
-    if (y_bot >= DISPLAY_LOG_H) y_bot = DISPLAY_LOG_H - 1;
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
     if (y_top > y_bot) return;
 
     uint16_t const frame = s_frame;
@@ -289,7 +331,7 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     if (x2 < x0) { tx=x0; ty=y0; x0=x2; y0=y2; x2=tx; y2=ty; }
     if (x2 < x1) { tx=x1; ty=y1; x1=x2; y1=y2; x2=tx; y2=ty; }
 
-    if (x2 <= 0.0f || x0 >= (float)DISPLAY_LOG_W) return;
+    if (x2 < (float)s_vp_x0 || x0 > (float)s_vp_x1) return;
     if (x2 - x0 < 1e-6f) return;
 
     float const dydx_02 = (y2 - y0) / (x2 - x0);
@@ -299,8 +341,8 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     int ix_start =     (int)ceilf(x0);
     int ix_split =     (int)ceilf(x1);
     int ix_endex = 1 + (int)floorf(x2);
-    if (ix_start < 0)             ix_start = 0;
-    if (ix_endex > DISPLAY_LOG_W) ix_endex = DISPLAY_LOG_W;
+    if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
+    if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
     if (ix_split < ix_start)      ix_split = ix_start;
     if (ix_split > ix_endex)      ix_split = ix_endex;
 
@@ -356,7 +398,7 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     int       ly  = y0;
 
     while (1) {
-        if (lx >= 0 && lx < DISPLAY_LOG_W && ly >= 0 && ly < DISPLAY_LOG_H) {
+        if (lx >= s_vp_x0 && lx <= s_vp_x1 && ly >= s_vp_y0 && ly <= s_vp_y1) {
             int di = (int)d;
             if (di < 0) di = 0;
             uint32_t const cell   = *dp;
@@ -447,20 +489,22 @@ se_scene_options_t scene_get_options(void) {
 // screen rect is the projected frustum's four side planes, so this is
 // frustum culling that already accounts for the camera pose and FOV.
 static inline bool tri_offscreen(scene_tri_t const* t) {
-    float const W = (float)DISPLAY_LOG_W, H = (float)DISPLAY_LOG_H;
-    if (t->v[0].sx <  0.0f && t->v[1].sx <  0.0f && t->v[2].sx <  0.0f) return true;
-    if (t->v[0].sx >= W    && t->v[1].sx >= W    && t->v[2].sx >= W)    return true;
-    if (t->v[0].sy <  0.0f && t->v[1].sy <  0.0f && t->v[2].sy <  0.0f) return true;
-    if (t->v[0].sy >= H    && t->v[1].sy >= H    && t->v[2].sy >= H)    return true;
+    float const L = (float)s_vp_x0, R = (float)s_vp_x1;
+    float const T = (float)s_vp_y0, B = (float)s_vp_y1;
+    if (t->v[0].sx < L && t->v[1].sx < L && t->v[2].sx < L) return true;
+    if (t->v[0].sx > R && t->v[1].sx > R && t->v[2].sx > R) return true;
+    if (t->v[0].sy < T && t->v[1].sy < T && t->v[2].sy < T) return true;
+    if (t->v[0].sy > B && t->v[1].sy > B && t->v[2].sy > B) return true;
     return false;
 }
 
 static inline bool seg_offscreen(scene_seg_t const* s) {
-    float const W = (float)DISPLAY_LOG_W, H = (float)DISPLAY_LOG_H;
-    if (s->v[0].sx <  0.0f && s->v[1].sx <  0.0f) return true;
-    if (s->v[0].sx >= W    && s->v[1].sx >= W)    return true;
-    if (s->v[0].sy <  0.0f && s->v[1].sy <  0.0f) return true;
-    if (s->v[0].sy >= H    && s->v[1].sy >= H)    return true;
+    float const L = (float)s_vp_x0, R = (float)s_vp_x1;
+    float const T = (float)s_vp_y0, B = (float)s_vp_y1;
+    if (s->v[0].sx < L && s->v[1].sx < L) return true;
+    if (s->v[0].sx > R && s->v[1].sx > R) return true;
+    if (s->v[0].sy < T && s->v[1].sy < T) return true;
+    if (s->v[0].sy > B && s->v[1].sy > B) return true;
     return false;
 }
 
@@ -647,11 +691,11 @@ static inline bool rc_tri_tiles(scene_tri_t const* t,
     }
     int ix0 = (int)floorf(minx), ix1 = (int)ceilf(maxx);
     int iy0 = (int)floorf(miny), iy1 = (int)ceilf(maxy);
-    if (ix0 < 0) ix0 = 0;
-    if (iy0 < 0) iy0 = 0;
-    if (ix1 > DISPLAY_LOG_W - 1) ix1 = DISPLAY_LOG_W - 1;
-    if (iy1 > DISPLAY_LOG_H - 1) iy1 = DISPLAY_LOG_H - 1;
-    if (ix0 > ix1 || iy0 > iy1) return false;   // wholly off-screen
+    if (ix0 < s_vp_x0) ix0 = s_vp_x0;
+    if (iy0 < s_vp_y0) iy0 = s_vp_y0;
+    if (ix1 > s_vp_x1) ix1 = s_vp_x1;
+    if (iy1 > s_vp_y1) iy1 = s_vp_y1;
+    if (ix0 > ix1 || iy0 > iy1) return false;   // wholly outside the viewport
     *tx0 = ix0 >> RC_TILE_SHIFT; *tx1 = ix1 >> RC_TILE_SHIFT;
     *ty0 = iy0 >> RC_TILE_SHIFT; *ty1 = iy1 >> RC_TILE_SHIFT;
     return true;
@@ -727,11 +771,17 @@ static bool rc_setup(scene_tri_t const* t, rc_setup_t* st) {
 // in the framebuffer index (see direct_565_logical_index) -- so the inner
 // loop walks memory contiguously, matching the rasterizer's column scan.
 static void rc_cast_tile(int tx, int ty, rc_setup_t const* set, int n) {
-    int const x0 = tx << RC_TILE_SHIFT;
-    int const y0 = ty << RC_TILE_SHIFT;
+    // A tile straddling the viewport edge is resolved only over the part
+    // inside it; one wholly outside was never binned, so it never gets
+    // here.
+    int x0 = tx << RC_TILE_SHIFT;
+    int y0 = ty << RC_TILE_SHIFT;
     int x1 = x0 + RC_TILE, y1 = y0 + RC_TILE;
-    if (x1 > DISPLAY_LOG_W) x1 = DISPLAY_LOG_W;
-    if (y1 > DISPLAY_LOG_H) y1 = DISPLAY_LOG_H;
+    if (x0 < s_vp_x0) x0 = s_vp_x0;
+    if (y0 < s_vp_y0) y0 = s_vp_y0;
+    if (x1 > s_vp_x1 + 1) x1 = s_vp_x1 + 1;
+    if (y1 > s_vp_y1 + 1) y1 = s_vp_y1 + 1;
+    if (x0 >= x1 || y0 >= y1) return;
 
     uint16_t const frame = s_frame;
     int      const base  = direct_565_logical_index(x0, y0);

@@ -16,7 +16,35 @@ stays internal and may change at any patch release.
 
 ## [Unreleased]
 
-> Nothing yet since 1.0.0.
+> Nothing yet since 1.1.0.
+
+## [1.1.0] — 2026-09-10
+
+### Added — `se_scene.h` (viewport)
+
+- **`scene_set_viewport(vp)` / `scene_viewport()`** restrict every pixel the
+  scene writes to a rectangle. Triangles, wireframe edges and the depth plane
+  are all clipped to it, and the optional frustum-cull pass now culls against
+  the viewport rather than the whole screen, so a smaller viewport tightens
+  culling for free. Both built-in renderers honour it: the z-buffer through its
+  column/span bounds, the raycaster through its tile binning and its per-tile
+  pixel loop.
+
+  For a game that frames its 3D view inside a fixed border — a cockpit
+  surround, a letterbox, a dashboard along the bottom. Without it, drawing the
+  whole screen and then painting the border over the top pays the fill twice:
+  once to rasterize pixels nobody sees, again to cover them. Those are usually
+  the expensive pixels, since a dashboard sits over the nearest and most
+  overdrawn band of a ground-plane scene.
+
+  The viewport clips; it does not scale or re-centre. The projection is still
+  the `RENDER_*` pinhole about `RENDER_HALF_W` / `RENDER_HORIZON_Y`, so an
+  off-centre viewport shows an off-centre crop of the same image. Moving the
+  vanishing point is what the `RENDER_*` overrides in `se_config.h` are for.
+
+  Defaults to the whole framebuffer and is **not** reset by `scene_begin()` —
+  how a game frames its view is a property of the game, not of the frame. A
+  game that never calls it renders exactly as it did under 1.0.0.
 
 ## [1.0.0] — 2026-09-09
 
