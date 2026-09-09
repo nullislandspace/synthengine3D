@@ -6,9 +6,10 @@ the run loop, a software 3D renderer, an audio mixer, menus, input remapping,
 device settings and save files — so a game is *content + per-frame logic*, not
 boilerplate.
 
-Extracted from the game **Race the Synth**; still vendored in that repo while
-the API settles. Pre-1.0: the public surface is documented and semver'd, but
-minor versions may still add (and, while < 1.0, occasionally change) it.
+Extracted from the game **Race the Synth**, which now consumes it as a git
+submodule like any other app. **1.0**: the public surface under `include/` is
+frozen and semver'd — minor versions may add to it, but breaking it requires a
+MAJOR bump.
 
 ---
 
@@ -20,6 +21,7 @@ minor versions may still add (and, while < 1.0, occasionally change) it.
 | **3D renderer** | `se_scene.h` | Per-pixel **z-buffered** software rasterizer + **6-DOF** pinhole camera + projection. Submit world-space triangles / wireframe edges; the engine projects, depth-tests and draws. Deferred: it accumulates the frame then `scene_render()`s it, with opt-in **frustum-cull** and **front-to-back ordering** passes (`scene_set_options`). |
 | **PPA compositor** | `se_ppa.h` | **ESP32-P4 PPA** hardware blit offload for 2D backdrops / sprite layers: fill / copy / colour-keyed blend on screen bands or sprite rects, an **ordered job queue + pump task** (non-blocking enqueue tagged with a job id, run in submission order; wait on a job id), the logical→raw orientation maths, and cache-line-aligned PSRAM layer caches — so the CPU stays free for the 3D scene. (P4-only; degrades to a no-op elsewhere.) |
 | **Audio** | `se_audio.h`, `se_audio_source.h`, `se_audio_dsp.h`, `se_voice.h`, `se_music_procedural.h` | 22050 Hz / s16 / stereo software mixer over the BSP I2S channel: one music slot + N SFX voices, app-pushed mute groups, idle power-down. DSP primitives (oscillators, envelopes, biquad), **pluggable synth voices** (`se_voice_t` note-on/off — built-in subtractive/noise, or your own; MIDI-ready), and a config-driven, seed-derived procedural music source with a voice per role (supply a `se_music_config_t`, or `NULL` for the synthwave preset). |
+| **Splash screen** | `se_splash.h` | `se_splash()` draws the engine wordmark as real world-space geometry (Hershey strokes emitted through `scene_line`) flying toward the camera for ~1 s, then returns. Blocking; call it from `on_init`. |
 | **UI / menus** | `se_ui.h` | Data-driven vertical list menus (label / checkbox / value / slider / custom-drawn rows), an engine-owned cursor state machine, and a blocking "press a key" capture for rebinds. |
 | **Input bindings** | `se_bindings.h` | Remappable, NVS-persisted key bindings: the game declares its controls + defaults; the engine loads, persists and answers them. |
 | **Device settings** | `se_hw.h` | The launcher-shared hardware settings (speaker/headphone volume, screen/keyboard/LED brightness): applied at boot, adjustable in-game, persisted back so they carry across apps. |

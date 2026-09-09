@@ -10,14 +10,20 @@ and the project follows semantic versioning as defined in `se_version.h`:
 - **PATCH** — internal-only changes (optimisation, refactor, bugfix) with no
   public-API effect.
 
-While the version is `0.x`, the surface is documented and semver-tracked but
-not yet frozen — minor releases may still adjust the API as it settles toward
-`1.0`.
+As of 1.0.0 the public surface is **frozen**: a breaking change to anything
+under `include/` requires a MAJOR bump. `src/` (including `src/internal/`)
+stays internal and may change at any patch release.
 
 ## [Unreleased]
 
-> Committed but not yet assigned a version number. These changes sit on top of
-> 0.2.0 until a release version is chosen.
+> Nothing yet since 1.0.0.
+
+## [1.0.0] — 2026-09-09
+
+> **First stable release.** The public surface under `include/` is now frozen
+> under semver: breaking changes to it require a MAJOR bump. Everything under
+> `src/` (including `src/internal/`) remains internal and may change at any
+> patch release.
 
 ### Added — `se_splash.h` (3D engine splash screen)
 
@@ -72,7 +78,7 @@ not yet frozen — minor releases may still adjust the API as it settles toward
   renderer needs. (These structs were previously private to `se_scene.c`;
   publishing them is an addition, not a change — no existing field moved.)
 
-### Changed (breaking — allowed pre-1.0)
+### Changed (breaking — landed before the 1.0 freeze)
 - **`render_camera_t` is now a full 6-DOF pose:** `{ x, y, z, yaw, pitch,
   roll }` (was `{ x, y }`). The two leading fields are unchanged, so code
   that reads `cam.x` / `cam.y` is source-compatible; the struct layout grew,
