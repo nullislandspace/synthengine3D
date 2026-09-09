@@ -19,6 +19,26 @@ not yet frozen — minor releases may still adjust the API as it settles toward
 > Committed but not yet assigned a version number. These changes sit on top of
 > 0.2.0 until a release version is chosen.
 
+### Added — `se_splash.h` (3D engine splash screen)
+
+- **`se_splash()` / `se_splash_ex(title, subtitle, seconds)`** — a short 3D
+  title sequence the engine draws for itself. Blocking: it runs its own frame
+  loop, drawing and presenting until the animation ends (~1 s by default),
+  then returns. Call it from `on_init()`.
+- The wordmark is **real geometry**, not a scaled image: each Hershey glyph is
+  walked stroke by stroke and emitted as world-space `scene_line()` segments on
+  one z plane, which then flies from far to near through the engine's own
+  pinhole camera. The zoom is therefore a true perspective approach — the text
+  grows *and* spreads outward from the vanishing point — rather than a blit
+  stretch. Font Y already points up, which is world +y, so glyph vertices need
+  no flip (unlike the 2D text path).
+- The default subtitle is `"Version <se_version_string()>"`, so it tracks the
+  engine instead of going stale; pass your own to override.
+- Requires `se_run()` to have bootstrapped (it borrows the engine's
+  framebuffers and vsync). Called before that, it logs a warning and returns.
+- Costs nothing if unused — `--gc-sections` strips it, as verified by Race the
+  Synth's binary being byte-identical in size across this change.
+
 ### Added — pluggable renderers + `SE_RENDER_RAYCAST`
 
 - **`scene_render()` / `scene_prepare()` / `scene_rasterize()` now dispatch on

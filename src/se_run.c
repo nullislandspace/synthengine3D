@@ -20,6 +20,7 @@
 #include "se_config.h"      // SE_FRAME_DT_MAX, SE_HW_VOLUME_STEP_PCT, SE_UI_*
 #include "se_audio.h"       // audio_mixer_init, audio_mixer_shutdown
 #include "se_hw.h"          // se_hw_init, se_hw_step_volume, se_hw_on_jack_event
+#include "se_frame.h"       // se_frame_back / se_frame_present (internal)
 #include "se_scene.h"       // scene_init
 #include "se_ui.h"          // se_ui_capture_key (defined here -- needs the loop)
 #include "se_text.h"        // rendertext_draw (capture prompt)
@@ -145,6 +146,21 @@ static void se_present(void) {
     pax_buf_t* tmp = s_fb;
     s_fb           = s_fb_front;
     s_fb_front     = tmp;
+}
+
+// ---- Internal frame access (src/internal/se_frame.h) -----------------
+//
+// Lets an engine facility outside this file run its own present loop (the
+// splash screen). Gated on s_fb_a_px so a call made before se_run() has
+// bootstrapped reports "no frame" instead of handing out a zero-initialised
+// pax_buf_t.
+
+pax_buf_t* se_frame_back(void) {
+    return (s_fb_a_px != NULL) ? s_fb : NULL;
+}
+
+void se_frame_present(void) {
+    if (s_fb_a_px != NULL) se_present();
 }
 
 // ---- Rebind key capture ---------------------------------------------
