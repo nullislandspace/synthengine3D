@@ -16,9 +16,14 @@ stays internal and may change at any patch release.
 
 ## [Unreleased]
 
-> Additive public API on top of 1.0.0. Releasing this would be **1.1.0**
-> under the contract above (MINOR = backwards-compatible additions);
-> `se_version.h` still says 1.0.0 until that release is cut.
+> Nothing yet since 1.0.0.
+
+## [1.0.0] — 2026-09-09
+
+> **First stable release.** The public surface under `include/` is now frozen
+> under semver: breaking changes to it require a MAJOR bump. Everything under
+> `src/` (including `src/internal/`) remains internal and may change at any
+> patch release.
 
 ### Added — `se_mp3.h` (MP3 music source)
 
@@ -45,19 +50,13 @@ stays internal and may change at any patch release.
   priority, so it yields to audio.
 
 
-## [1.0.0] — 2026-09-09
-
-> **First stable release.** The public surface under `include/` is now frozen
-> under semver: breaking changes to it require a MAJOR bump. Everything under
-> `src/` (including `src/internal/`) remains internal and may change at any
-> patch release.
-
 ### Added — `se_splash.h` (3D engine splash screen)
 
 - **`se_splash()` / `se_splash_ex(title, subtitle, seconds)`** — a short 3D
   title sequence the engine draws for itself. Blocking: it runs its own frame
-  loop, drawing and presenting until the animation ends (~1 s by default),
-  then returns. Call it from `on_init()`.
+  loop, drawing and presenting until the animation ends (a ~1 s zoom then a
+  2 s hold by default),
+  holds for two seconds, then returns. Call it from `on_init()`.
 - The wordmark is **real geometry**, not a scaled image: each Hershey glyph is
   walked stroke by stroke and emitted as world-space `scene_line()` segments on
   one z plane, which then flies from far to near through the engine's own
