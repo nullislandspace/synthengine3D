@@ -25,6 +25,7 @@
 #include "se_nbt.h"             // E3  -- NBT serialization primitive
 #include "se_save.h"            // E3  -- file-backed save-slot framework
 #include "se_scene.h"           // E4  -- 3D scene renderer + camera + projection
+#include "se_light.h"           // E4  -- optional positional scene light
 #include "se_ppa.h"             // E7  -- ESP32-P4 PPA blit helper (backdrop offload)
 #include "se_run.h"             // EF  -- application framework / run loop (API; impl staged in)
 #include "se_splash.h"          // EF  -- 3D engine splash screen

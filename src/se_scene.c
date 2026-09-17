@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"      // scene_raster_stats per-phase timing
+#include "se_light_internal.h"  // se_light_is_on / se_light_shade_tri
 
 static char const* TAG = "scene";
 
@@ -437,6 +438,14 @@ void scene_tri(float x0, float y0, float z0,
     scene_project_cam(c0x, c0y, c0z, &t->v[0]);
     scene_project_cam(c1x, c1y, c1z, &t->v[1]);
     scene_project_cam(c2x, c2y, c2z, &t->v[2]);
+    // Lighting (se_light.h): shade the face once, here at submit time,
+    // from the WORLD-space vertices -- the light lives in world space,
+    // and by this point the camera-space copies are all that survive.
+    // Off by default, and then this is a load and a branch.
+    if (se_light_is_on) {
+        argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
+                                  s_camera.x, s_camera.y, s_camera.z);
+    }
     t->packed = direct_565_pack(argb, s_rev);
 }
 

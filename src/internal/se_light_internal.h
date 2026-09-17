@@ -1,0 +1,31 @@
+#pragma once
+// =====================================================================
+//  SynthEngine3D  --  INTERNAL  --  lighting hook for the scene
+// ---------------------------------------------------------------------
+//  The seam between se_light.c (which owns the light) and se_scene.c
+//  (which applies it in scene_tri). INTERNAL: not reachable from a
+//  game's include path and not covered by the semver contract.
+// =====================================================================
+
+#include <stdbool.h>
+#include <stdint.h>
+
+// True when a light is set. Read directly rather than through an
+// accessor because scene_tri tests it once per triangle and lighting
+// must cost nothing at all when it is off -- a load and a branch, no
+// call. Written only by se_light_set().
+extern bool se_light_is_on;
+
+// Shade `argb` for one world-space triangle and return the result.
+// Derives the face normal from the vertices, so the caller passes the
+// same world-space coordinates it received. (camx, camy, camz) is the
+// eye, needed only for the two_sided normal flip.
+//
+// Only call this when se_light_is_on. Alpha is preserved; the RGB
+// channels are scaled by a factor in [1 - brightness, 1], so the result
+// can never overflow the input.
+uint32_t se_light_shade_tri(uint32_t argb,
+                            float x0, float y0, float z0,
+                            float x1, float y1, float z1,
+                            float x2, float y2, float z2,
+                            float camx, float camy, float camz);

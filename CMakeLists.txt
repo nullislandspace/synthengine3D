@@ -24,6 +24,7 @@ set(SE_SRCS
     src/nbt.c              # E3: NBT serialization primitive
     src/se_save.c          # E3: file-backed save-slot framework
     src/se_scene.c         # E4: z-buffer rasterizer + camera + projection
+    src/se_light.c         # E4: scene lighting (one positional light)
     src/se_run.c           # EF: application framework / run loop
     src/se_splash.c        # EF: 3D engine splash screen
     src/se_hw.c            # EF: device-global hardware settings (volume/brightness)

@@ -175,12 +175,46 @@ never matches a live frame.
 
 - **Does:** projection through a 6-DOF camera, the near-clip guard, per-pixel
   depth test + write, flat-shaded triangle fill, depth-biased wireframe, opt-in
-  frustum cull + front-to-back ordering.
-- **Doesn't (yet / by design):** lighting, texturing, per-vertex colour,
-  back-face culling (game-side, by design). **The game owns shading** — compute
-  a face colour (e.g. per-face lighting from a normal) and pass it as the
-  triangle's `argb`. **The game owns its object/world model** — the engine
-  never sees "objects", only triangles and edges (see [objects.md](objects.md)).
+  frustum cull + front-to-back ordering, opt-in single-light shading
+  ([`se_light.h`](../include/se_light.h), see below).
+- **Doesn't (yet / by design):** texturing, per-vertex colour, more than one
+  light, shadows, distance falloff, specular, back-face culling (game-side, by
+  design). **The game owns its object/world model** — the engine never sees
+  "objects", only triangles and edges (see [objects.md](objects.md)).
+
+## Lighting (`se_light.h`)
+
+Optional, and off unless a game calls `se_light_set()`. One positional light:
+
+```c
+se_light_set(&(se_light_t){ .x = -4.0f, .y = 2.2f, .z = -1.0f,
+                            .brightness = 0.45f, .two_sided = true });
+```
+
+`brightness` is the **directional share of the total illumination**, 0..1; the
+remainder is global illumination that reaches every surface. With `d` = how
+squarely the face meets the light:
+
+    shade = (1 - brightness) + brightness * d
+
+So a face square-on to the light keeps its full colour, and a face turned away
+falls to `1 - brightness` — never to black unless `brightness` is 1.0.
+
+Applied **per triangle in `scene_tri`, at submit time** — not per pixel. A
+triangle is one flat colour on screen, so per-pixel shading would buy nothing,
+and a per-face quantity is what a later texturing pass would want to modulate.
+The engine derives the normal from the world-space vertices it is handed, which
+is why `scene_tri` takes world space rather than pre-projected coordinates.
+
+Because the engine does not mandate a winding, `two_sided` orients each normal
+towards the camera so the visible side is the lit side. Set it `false` to use
+the raw cross-product normal, which is correct only for CCW-outward winding.
+
+Wireframe edges (`scene_line`) are never lit — a line has no normal. Note the
+game still owns **back-face culling**, so a lit game computes the face normal
+once for its own cull and the engine computes it again for the shade; at a few
+hundred triangles a frame that duplication is far cheaper than an API that
+makes the game hand its normals over.
 
 ## Tuning notes
 
