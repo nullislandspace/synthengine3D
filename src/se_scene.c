@@ -92,11 +92,18 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 //
 // Depth is the reciprocal of world-z (1/z), the quantity that
 // interpolates linearly in screen space under the pinhole
-// projection. Near-clipped z is RENDER_NEAR_CLIP_Z (0.5), so 1/z
-// peaks at 2.0; SCENE_DEPTH_SCALE maps that to 64000 — inside the
-// uint16 range with headroom, so the rasterizer never has to clamp
-// the high end. Larger encoded value = nearer.
-#define SCENE_DEPTH_SCALE   32000.0f
+// projection. Nothing nearer than the near plane is drawn, so 1/z
+// peaks at 1/RENDER_NEAR_CLIP_Z; SCENE_DEPTH_SCALE maps that to 64000
+// whatever the near plane is -- inside the uint16 range with headroom
+// (also for the edge bias below), so the rasterizer never has to clamp
+// the high end. Larger encoded value = nearer. At the default near
+// plane (0.5) the scale is exactly 32000.
+//
+// The price of a nearer near plane: the scale shrinks with it, so one
+// depth step, z^2 / SCENE_DEPTH_SCALE, grows at every distance, and
+// the far limit -- where 1/z encodes to less than 1 and nothing is
+// drawn -- moves in to z = SCENE_DEPTH_SCALE.
+#define SCENE_DEPTH_SCALE   (64000.0f * RENDER_NEAR_CLIP_Z)
 
 // Wireframe edges are nudged this fraction nearer (in 1/z space)
 // before the depth compare, so an edge reliably beats the coplanar

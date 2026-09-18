@@ -41,7 +41,12 @@ leaves hardcode rotation + stride into their inner loops off these.
   line the 3D scene up with your backdrop.**
 - `RENDER_FOCAL_LEN` — focal length (lateral FOV).
 - `RENDER_CAM_Y` — the camera's resting eye height.
-- `RENDER_NEAR_CLIP_Z` — near plane; geometry fully behind it is dropped.
+- `RENDER_NEAR_CLIP_Z` — near plane (default 0.5, must be > 0). Geometry
+  crossing it is clipped to it; geometry wholly behind it is dropped. The depth
+  buffer scales with it (1/z is stored as 64000 × near / z), so the nearest
+  drawable point always uses the full 16-bit range. A nearer plane costs depth
+  precision everywhere (one step ≈ z² / (64000 × near)) and pulls the far limit
+  in to z = 64000 × near.
 
 ### Audio (`se_audio`)
 - `AUDIO_MUSIC_GAIN` / `AUDIO_SFX_GAIN` — master music-vs-SFX balance (Q15 at

@@ -42,6 +42,12 @@ release.
   vertices clamped onto the plane, which distorted it. An edge crossing the
   plane is shortened to it. Primitives entirely in front of the plane are
   unaffected, bit for bit. A clipped triangle can take two list entries.
+- **The depth scale follows `RENDER_NEAR_CLIP_Z`.** 1/z is stored as
+  64000 × near / z, so the nearest drawable point encodes to 64000 whatever the
+  near plane is. Before, the scale was fixed at 32000, which only fitted the
+  default 0.5. A game overriding the near plane below ~0.49 overflowed the
+  16-bit depth, so its nearest surfaces wrapped around and lost the depth test.
+  At the default near plane nothing changes, bit for bit.
 
 ### Added — `se_scene.h` (triangle flags)
 

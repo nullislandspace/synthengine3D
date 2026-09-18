@@ -245,7 +245,11 @@
 #endif
 // The near plane, in camera-space z. Triangles and edges that cross it
 // are clipped to it (a triangle becomes one or two), wholly-behind ones
-// are dropped, and so are points behind it.
+// are dropped, and so are points behind it. Must be > 0. The depth
+// buffer's scale follows it (se_scene.c, SCENE_DEPTH_SCALE = 64000 *
+// near): halving the near plane halves the depth precision at every
+// distance and halves the far limit, which is z = 64000 * near (32000
+// at the default 0.5).
 #ifndef RENDER_NEAR_CLIP_Z
 #define RENDER_NEAR_CLIP_Z  0.5f
 #endif
