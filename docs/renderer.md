@@ -174,12 +174,13 @@ never matches a live frame.
 ## What the engine does and doesn't do
 
 - **Does:** projection through a 6-DOF camera, the near-clip guard, per-pixel
-  depth test + write, flat-shaded triangle fill, depth-biased wireframe, opt-in
-  frustum cull + front-to-back ordering, opt-in single-light shading
-  ([`se_light.h`](../include/se_light.h), see below).
-- **Doesn't (yet / by design):** texturing, per-vertex colour, more than one
-  light, shadows, distance falloff, specular, back-face culling (game-side, by
-  design). **The game owns its object/world model** — the engine never sees
+  depth test + write, flat-shaded triangle fill, perspective-correct textured
+  triangles ([`se_texture.h`](../include/se_texture.h), see below),
+  depth-biased wireframe, opt-in frustum cull + front-to-back ordering, opt-in
+  single-light shading ([`se_light.h`](../include/se_light.h), see below).
+- **Doesn't (yet / by design):** texture filtering or mipmaps, transparency,
+  per-vertex colour, more than one light, shadows, distance falloff, specular,
+  back-face culling (game-side, by design). **The game owns its object/world model** — the engine never sees
   "objects", only triangles and edges (see [objects.md](objects.md)).
 
 ## Lighting (`se_light.h`)
@@ -215,6 +216,44 @@ game still owns **back-face culling**, so a lit game computes the face normal
 once for its own cull and the engine computes it again for the shade; at a few
 hundred triangles a frame that duplication is far cheaper than an API that
 makes the game hand its normals over.
+
+## Textured triangles (`se_texture.h`, `scene_textured_tri`)
+
+A third primitive next to `scene_tri` and `scene_line`, which are unchanged:
+
+```c
+se_texture_t* metal = se_texture_load("/sd/apps/my.app/metal.png", SE_TEXTURE_INTERNAL);
+
+se_tex_vertex_t const v[3] = {
+    {x0, y0, z0, 0.0f, 0.0f},   // world position, then u, v
+    {x1, y1, z1, 1.0f, 0.0f},
+    {x2, y2, z2, 0.0f, 1.0f},
+};
+scene_textured_tri(v, metal);
+```
+
+- **Textures** are PNGs, decoded by libspng (which graceloader carries) into
+  RGB565. Both edges must be a power of two, up to `SE_TEXTURE_MAX_DIM`; alpha
+  is discarded. `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, falling
+  back to PSRAM (logged, and reported in `tex->internal`) if it won't fit.
+- **Coordinates:** `(0,0)` is the texture's top-left, `(1,1)` its bottom-right,
+  and anything outside repeats. Mapping is perspective-correct: `u·w` and `v·w`
+  interpolate linearly and are divided by `w` per drawn pixel. Sampling is
+  nearest-texel.
+- **Its own list.** Textured triangles are deferred into a separate list, which
+  isn't allocated until the first texture loads. They rasterize after the flat
+  triangles and before the edges, depth-tested against both, so the three
+  primitives mix freely. Cull and order apply to that list as they do to the
+  flat one. The raycast renderer draws them with the same textured pass,
+  against the depth its ray hits wrote. A custom renderer sees them in
+  `se_geometry_t.ttris` and can call `se_scene_raster_textured()`.
+- **Lighting** applies as it does to flat triangles: the same per-face shade,
+  computed at submit time, kept as a 0..32 factor and applied to each texel.
+- **Cost.** The divide and the texel fetch only happen for pixels that pass the
+  depth test, but that is still far more work per pixel than a flat fill.
+  `scene_textured_stats()` reports the pass separately from
+  `scene_raster_stats()`. See the showreel's `devdocs/performance.md` for
+  measured numbers.
 
 ## Tuning notes
 

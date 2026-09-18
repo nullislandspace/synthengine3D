@@ -248,3 +248,22 @@
 #ifndef RENDER_NEAR_CLIP_Z
 #define RENDER_NEAR_CLIP_Z  0.5f
 #endif
+
+// ---- Textures + textured triangles (se_texture.h, se_scene.h) -------
+//
+// Largest texture edge se_texture_load() accepts, in texels. Textures
+// must be a power of two on both edges (the rasterizer wraps with a
+// mask), so this is also the largest power of two allowed. It bounds
+// the decode scratch buffer too: 4 bytes per texel, briefly, in PSRAM.
+#ifndef SE_TEXTURE_MAX_DIM
+#define SE_TEXTURE_MAX_DIM  512
+#endif
+
+// Textured triangles one frame can hold. The list is separate from the
+// flat-triangle list and costs nothing until the first texture is loaded
+// (it is allocated then, internal SRAM first, PSRAM as the fallback). At
+// ~68 bytes each, the default is ~68 KB; overflow drops the extra
+// triangles, exactly as the flat list does.
+#ifndef SE_SCENE_TEXTURED_TRI_CAP
+#define SE_SCENE_TEXTURED_TRI_CAP  1024
+#endif

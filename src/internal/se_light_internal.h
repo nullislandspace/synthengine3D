@@ -16,6 +16,16 @@
 // call. Written only by se_light_set().
 extern bool se_light_is_on;
 
+// The shade factor for one world-space triangle: (1 - brightness) +
+// brightness * max(0, cos(angle to the light)), in [1 - brightness, 1].
+// 1.0 for a degenerate triangle or a light sitting on the face. The
+// textured path keeps this as a per-face factor; se_light_shade_tri
+// folds it into a colour. Only call when se_light_is_on.
+float se_light_face_shade(float x0, float y0, float z0,
+                          float x1, float y1, float z1,
+                          float x2, float y2, float z2,
+                          float camx, float camy, float camz);
+
 // Shade `argb` for one world-space triangle and return the result.
 // Derives the face normal from the vertices, so the caller passes the
 // same world-space coordinates it received. (camx, camy, camz) is the

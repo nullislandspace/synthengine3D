@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"      // scene_raster_stats per-phase timing
 #include "se_light_internal.h"  // se_light_is_on / se_light_shade_tri
+#include "se_scene_internal.h"  // scene_textured_reserve (called by se_texture_load)
 
 static char const* TAG = "scene";
 
@@ -146,6 +147,14 @@ static int          s_tri_n   = 0;
 static scene_seg_t* s_lines   = NULL;   // accumulated wireframe edges
 static int          s_line_n  = 0;
 
+// Textured triangles: a list of their own, so the flat-triangle list and
+// its se_tri_t layout are untouched. NULL until the first texture is
+// loaded (scene_textured_reserve), so a game without textures pays
+// nothing for it.
+static se_ttri_t*   s_ttris       = NULL;
+static int          s_ttri_n      = 0;
+static bool         s_ttri_failed = false;   // allocation failed: stop retrying
+
 static uint16_t*    s_fb      = NULL;
 static bool         s_rev     = false;
 static uint16_t     s_frame   = 0;      // current frame tag (never 0 while live)
@@ -156,6 +165,8 @@ static int          s_stat_tri_n   = 0;
 static int          s_stat_line_n  = 0;
 static int64_t      s_stat_tri_us  = 0;
 static int64_t      s_stat_line_us = 0;
+static int          s_stat_ttri_n  = 0;
+static int64_t      s_stat_ttri_us = 0;
 
 // Optional render passes (frustum cull / depth order). Both default OFF
 // so scene_render() is behaviour- and byte-identical to the no-op cut
@@ -202,10 +213,31 @@ void scene_begin(pax_buf_t* fb) {
     s_rev    = fb->reverse_endianness;
     s_tri_n  = 0;
     s_line_n = 0;
+    s_ttri_n = 0;
     // Advance the frame tag; skip 0 so a zero-initialised stamp cell
     // is never mistaken for "written this frame".
     s_frame++;
     if (s_frame == 0) s_frame = 1;
+}
+
+bool scene_textured_reserve(void) {
+    if (s_ttris != NULL) return true;
+    if (s_ttri_failed) return false;
+    // Internal SRAM first, for the same reason as the flat list (see
+    // scene_init): cull + order run on it while the PPA backdrop DMA
+    // saturates the PSRAM bus. PSRAM if internal is too tight.
+    size_t const sz = (size_t)SE_SCENE_TEXTURED_TRI_CAP * sizeof(se_ttri_t);
+    s_ttris = heap_caps_malloc(sz, MALLOC_CAP_INTERNAL);
+    bool const internal = (s_ttris != NULL);
+    if (s_ttris == NULL) s_ttris = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+    if (s_ttris == NULL) {
+        ESP_LOGE(TAG, "textured-triangle list allocation failed (%u bytes)", (unsigned)sz);
+        s_ttri_failed = true;
+        return false;
+    }
+    ESP_LOGI(TAG, "textured list: %s (%uKB, %d tris)", internal ? "INTERNAL" : "PSRAM",
+             (unsigned)(sz / 1024), SE_SCENE_TEXTURED_TRI_CAP);
+    return true;
 }
 
 // --- Projection ---------------------------------------------------------------
@@ -366,6 +398,163 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     }
 }
 
+// --- Textured triangle rasterizer ---------------------------------------------
+//
+// The flat path above is left exactly as it was; this is a sibling, not
+// a generalisation of it. Same logical-X column scan, same depth plane
+// and depth test, same viewport clip. The difference is what happens to
+// a pixel that passes the depth test.
+//
+// Three quantities are affine in screen space under the pinhole
+// projection: w = 1/z, and u*w, v*w. So each gets a plane A*x + B*y + C,
+// and a +1 step down a column is one add per plane. The texel is
+// (u*w)/w, (v*w)/w: perspective-correct, at the price of one divide per
+// DRAWN pixel. The depth test comes first, so a pixel that loses to
+// nearer geometry never pays for the divide or the texel fetch.
+//
+// All three planes carry the same SCENE_DEPTH_SCALE factor, so the
+// encoded depth the test already has is also the divisor: no extra
+// multiply to get w back.
+
+typedef struct {
+    float           Ad, Bd, Cd;   // encoded depth, w * SCENE_DEPTH_SCALE
+    float           Au, Bu, Cu;   // u * w * SCENE_DEPTH_SCALE, u in texels
+    float           Av, Bv, Cv;   // v * w * SCENE_DEPTH_SCALE, v in texels
+    uint16_t const* texels;
+    uint32_t        wmask, hmask;
+    uint32_t        wlog2;
+    uint32_t        shade;        // 0..32
+} ttri_setup_t;
+
+static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (y_top > y_bot) return;
+
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = direct_565_logical_index(lx, y_top);
+    uint16_t*       fp    = s_fb + idx;
+    uint32_t*       dp    = s_ds + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  sh    = st->shade;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint32_t const cell   = *dp;
+        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        if ((uint16_t)di > stored) {
+            *dp = fhi | (uint16_t)di;
+            // di >= 1 here, so d >= 1: the divide is safe.
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            // Scale all three RGB565 channels with one multiply: spread
+            // G into the upper half-word, leaving 5-6 bits of headroom
+            // above each field, multiply by the 0..32 shade, shift back.
+            uint32_t x = (t | (t << 16)) & 0x07E0F81Fu;
+            x          = ((x * sh) >> 5) & 0x07E0F81Fu;
+            uint16_t px = (uint16_t)(x | (x >> 16));
+            if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+            *fp = px;
+        }
+        fp--;
+        dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
+static void scene_raster_ttri(se_ttri_t const* t) {
+    se_tvtx_t const a = t->v[0], b = t->v[1], c = t->v[2];
+    float const ex1 = b.sx - a.sx, ey1 = b.sy - a.sy;
+    float const ex2 = c.sx - a.sx, ey2 = c.sy - a.sy;
+    float const nz  = ex1 * ey2 - ey1 * ex2;
+    if (nz > -1e-6f && nz < 1e-6f) return;   // zero screen area
+    float const inv_nz = 1.0f / nz;
+
+    // Plane through (sx, sy, q) for each interpolated quantity -- the
+    // same construction scene_raster_tri uses for its depth plane.
+    ttri_setup_t st;
+#define TTRI_PLANE(qa, qb, qc, A, B, C)                          \
+    do {                                                        \
+        float const eq1 = ((qb) - (qa)) * SCENE_DEPTH_SCALE;    \
+        float const eq2 = ((qc) - (qa)) * SCENE_DEPTH_SCALE;    \
+        (A) = (eq1 * ey2 - ey1 * eq2) * inv_nz;                 \
+        (B) = (ex1 * eq2 - eq1 * ex2) * inv_nz;                 \
+        (C) = (qa) * SCENE_DEPTH_SCALE - (A) * a.sx - (B) * a.sy; \
+    } while (0)
+    TTRI_PLANE(a.w, b.w, c.w, st.Ad, st.Bd, st.Cd);
+    TTRI_PLANE(a.uw, b.uw, c.uw, st.Au, st.Bu, st.Cu);
+    TTRI_PLANE(a.vw, b.vw, c.vw, st.Av, st.Bv, st.Cv);
+#undef TTRI_PLANE
+    st.texels = t->tex->texels;
+    st.wmask  = (uint32_t)t->tex->w - 1u;
+    st.hmask  = (uint32_t)t->tex->h - 1u;
+    st.wlog2  = t->tex->w_log2;
+    st.shade  = t->shade;
+
+    // Column scan, as in scene_raster_tri.
+    float x0 = a.sx, y0 = a.sy, x1 = b.sx, y1 = b.sy, x2 = c.sx, y2 = c.sy;
+    float tx, ty;
+    if (x1 < x0) { tx=x0; ty=y0; x0=x1; y0=y1; x1=tx; y1=ty; }
+    if (x2 < x0) { tx=x0; ty=y0; x0=x2; y0=y2; x2=tx; y2=ty; }
+    if (x2 < x1) { tx=x1; ty=y1; x1=x2; y1=y2; x2=tx; y2=ty; }
+
+    if (x2 < (float)s_vp_x0 || x0 > (float)s_vp_x1) return;
+    if (x2 - x0 < 1e-6f) return;
+
+    float const dydx_02 = (y2 - y0) / (x2 - x0);
+    float const dydx_01 = (x1 > x0) ? (y1 - y0) / (x1 - x0) : 0.0f;
+    float const dydx_12 = (x2 > x1) ? (y2 - y1) / (x2 - x1) : 0.0f;
+
+    int ix_start =     (int)ceilf(x0);
+    int ix_split =     (int)ceilf(x1);
+    int ix_endex = 1 + (int)floorf(x2);
+    if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
+    if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
+    if (ix_split < ix_start)      ix_split = ix_start;
+    if (ix_split > ix_endex)      ix_split = ix_endex;
+
+    for (int x = ix_start; x < ix_split; x++) {
+        float const dx = (float)x - x0;
+        float const ya = y0 + dydx_02 * dx;
+        float const yb = y0 + dydx_01 * dx;
+        float yt, yz;
+        if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
+        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+    }
+    for (int x = ix_split; x < ix_endex; x++) {
+        float const dx02 = (float)x - x0;
+        float const dx12 = (float)x - x1;
+        float const ya   = y0 + dydx_02 * dx02;
+        float const yb   = y1 + dydx_12 * dx12;
+        float yt, yz;
+        if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
+        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+    }
+}
+
+void se_scene_raster_textured(void) {
+    if (s_ttris == NULL || s_fb == NULL || s_ds == NULL) return;
+    int64_t const t0 = esp_timer_get_time();
+    for (int i = 0; i < s_ttri_n; i++) {
+        scene_raster_ttri(&s_ttris[i]);
+    }
+    s_stat_ttri_us = esp_timer_get_time() - t0;
+}
+
 // --- Line rasterizer ----------------------------------------------------------
 
 // Depth-tested wireframe edge. Bresenham line with encoded depth
@@ -463,6 +652,55 @@ void scene_line(float x0, float y0, float z0,
     seg->packed = direct_565_pack(argb, s_rev);
 }
 
+void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex) {
+    if (v == NULL || tex == NULL || tex->texels == NULL) return;
+    if (s_ttris == NULL && !scene_textured_reserve()) return;
+    float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
+    camera_transform(v[0].x, v[0].y, v[0].z, &c0x, &c0y, &c0z);
+    camera_transform(v[1].x, v[1].y, v[1].z, &c1x, &c1y, &c1z);
+    camera_transform(v[2].x, v[2].y, v[2].z, &c2x, &c2y, &c2z);
+    // Same whole-triangle near cull as scene_tri.
+    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z && c2z < RENDER_NEAR_CLIP_Z) {
+        return;
+    }
+    if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;   // overflow: drop, as scene_tri does
+    se_ttri_t* t = &s_ttris[s_ttri_n++];
+    scene_vtx_t p[3];
+    scene_project_cam(c0x, c0y, c0z, &p[0]);
+    scene_project_cam(c1x, c1y, c1z, &p[1]);
+    scene_project_cam(c2x, c2y, c2z, &p[2]);
+
+    // Shift the coordinates by whole texture periods so all three are
+    // >= 0. Repeating makes that invisible, and it lets the rasterizer
+    // turn a texel coordinate into an index by truncating to int, which
+    // only rounds the right way (down) for non-negative values.
+    float umin = v[0].u, vmin = v[0].v;
+    if (v[1].u < umin) umin = v[1].u;
+    if (v[2].u < umin) umin = v[2].u;
+    if (v[1].v < vmin) vmin = v[1].v;
+    if (v[2].v < vmin) vmin = v[2].v;
+    float const ush = floorf(umin), vsh = floorf(vmin);
+    float const tw = (float)tex->w, th = (float)tex->h;
+    for (int i = 0; i < 3; i++) {
+        t->v[i].sx = p[i].sx;
+        t->v[i].sy = p[i].sy;
+        t->v[i].w  = p[i].w;
+        t->v[i].uw = (v[i].u - ush) * tw * p[i].w;
+        t->v[i].vw = (v[i].v - vsh) * th * p[i].w;
+    }
+    t->tex = tex;
+
+    // Lighting (se_light.h): the same per-face shade scene_tri applies,
+    // from the same world-space vertices, but kept as a factor because
+    // there is no single colour to fold it into.
+    t->shade = 32;
+    if (se_light_is_on) {
+        float const sh = se_light_face_shade(v[0].x, v[0].y, v[0].z, v[1].x, v[1].y, v[1].z,
+                                             v[2].x, v[2].y, v[2].z, s_camera.x, s_camera.y, s_camera.z);
+        t->shade = (uint8_t)(sh * 32.0f + 0.5f);
+    }
+}
+
 // --- Deferred render: cull -> order -> rasterize ------------------------------
 //
 // Central cull / order passes, both opt-in via scene_set_options() and
@@ -507,6 +745,16 @@ static inline bool tri_offscreen(scene_tri_t const* t) {
     return false;
 }
 
+static inline bool ttri_offscreen(se_ttri_t const* t) {
+    float const L = (float)s_vp_x0, R = (float)s_vp_x1;
+    float const T = (float)s_vp_y0, B = (float)s_vp_y1;
+    if (t->v[0].sx < L && t->v[1].sx < L && t->v[2].sx < L) return true;
+    if (t->v[0].sx > R && t->v[1].sx > R && t->v[2].sx > R) return true;
+    if (t->v[0].sy < T && t->v[1].sy < T && t->v[2].sy < T) return true;
+    if (t->v[0].sy > B && t->v[1].sy > B && t->v[2].sy > B) return true;
+    return false;
+}
+
 static inline bool seg_offscreen(scene_seg_t const* s) {
     float const L = (float)s_vp_x0, R = (float)s_vp_x1;
     float const T = (float)s_vp_y0, B = (float)s_vp_y1;
@@ -539,6 +787,14 @@ static void scene_cull_pass(void) {
         }
     }
     s_line_n = w;
+    w = 0;
+    for (int i = 0; i < s_ttri_n; i++) {
+        if (!ttri_offscreen(&s_ttris[i])) {
+            if (w != i) s_ttris[w] = s_ttris[i];
+            w++;
+        }
+    }
+    s_ttri_n = w;
 }
 
 // Front-to-back triangle comparator: nearer first. Vertex w is 1/z
@@ -560,10 +816,27 @@ static int tri_cmp_near_first(void const* pa, void const* pb) {
 // buffer is order-independent (max-wins per pixel), so the image is
 // identical; only the count of framebuffer writes changes. Edges are
 // never sorted — they don't write depth, so their order can't matter.
+static int ttri_cmp_near_first(void const* pa, void const* pb) {
+    se_ttri_t const* a = (se_ttri_t const*)pa;
+    se_ttri_t const* b = (se_ttri_t const*)pb;
+    float const wa = a->v[0].w + a->v[1].w + a->v[2].w;
+    float const wb = b->v[0].w + b->v[1].w + b->v[2].w;
+    if (wa > wb) return -1;
+    if (wa < wb) return 1;
+    return 0;
+}
+
 static void scene_order_pass(void) {
     if (!s_opts.depth_order) return;
     if (s_tri_n > 1) {
         qsort(s_tris, (size_t)s_tri_n, sizeof(scene_tri_t), tri_cmp_near_first);
+    }
+    // Sorted within their own list: the two lists rasterize one after
+    // the other, so they cannot interleave. Early-z pays off more here
+    // than for flat triangles, since an occluded textured pixel skips a
+    // divide and a texel fetch as well as the framebuffer write.
+    if (s_ttri_n > 1) {
+        qsort(s_ttris, (size_t)s_ttri_n, sizeof(se_ttri_t), ttri_cmp_near_first);
     }
 }
 
@@ -590,13 +863,17 @@ static void zbuf_rasterize(void* user) {
         scene_raster_tri(s_tris[i].v[0], s_tris[i].v[1], s_tris[i].v[2], s_tris[i].packed);
     }
     int64_t const t_r1 = esp_timer_get_time();
+    // Then the textured triangles, z-tested against the flat ones (timed
+    // separately, inside se_scene_raster_textured).
+    se_scene_raster_textured();
+    int64_t const t_r1b = esp_timer_get_time();
     // Then the wireframe edges, z-tested against the depth the tris wrote.
     for (int i = 0; i < s_line_n; i++) {
         scene_raster_line(s_lines[i].v[0], s_lines[i].v[1], s_lines[i].packed);
     }
     int64_t const t_r2 = esp_timer_get_time();
     s_stat_tri_us  = t_r1 - t_r0;
-    s_stat_line_us = t_r2 - t_r1;
+    s_stat_line_us = t_r2 - t_r1b;
 }
 
 // =====================================================================
@@ -867,6 +1144,12 @@ static void raycast_rasterize(void* user) {
         }
     }
     int64_t const t_r1 = esp_timer_get_time();
+    // Textured triangles are not cast: they go through the shared
+    // textured rasterizer, depth-tested against what the ray hits wrote
+    // (same depth encoding), so the two compose exactly as in the
+    // z-buffer renderer.
+    se_scene_raster_textured();
+    int64_t const t_r1b = esp_timer_get_time();
     // Wireframe edges are an overlay in both renderers: same Bresenham
     // pass, z-tested against the depth the ray hits just wrote.
     for (int i = 0; i < s_line_n; i++) {
@@ -874,7 +1157,7 @@ static void raycast_rasterize(void* user) {
     }
     int64_t const t_r2 = esp_timer_get_time();
     s_stat_tri_us  = t_r1 - t_r0;
-    s_stat_line_us = t_r2 - t_r1;
+    s_stat_line_us = t_r2 - t_r1b;
 }
 
 // =====================================================================
@@ -924,6 +1207,8 @@ se_geometry_t se_scene_geometry(void) {
         .depth       = s_ds,
         .frame       = s_frame,
         .depth_scale = SCENE_DEPTH_SCALE,
+        .ttris       = s_ttris,
+        .ttri_n      = s_ttri_n,
     };
 }
 
@@ -945,12 +1230,15 @@ void scene_rasterize(se_render_mode_t mode) {
     // wireframe edges -- and so the two renderers can be compared directly.
     s_stat_tri_n  = s_tri_n;
     s_stat_line_n = s_line_n;
+    s_stat_ttri_n  = s_ttri_n;
+    s_stat_ttri_us = 0;   // stays 0 if a custom renderer skips the textured pass
 
     se_renderer_t const* const r = renderer_for(mode);
     r->rasterize(r->user);
 
     s_tri_n  = 0;
     s_line_n = 0;
+    s_ttri_n = 0;
 }
 
 void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_us) {
@@ -958,6 +1246,11 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
     if (line_n)  *line_n  = s_stat_line_n;
     if (tri_us)  *tri_us  = s_stat_tri_us;
     if (line_us) *line_us = s_stat_line_us;
+}
+
+void scene_textured_stats(int* ttri_n, int64_t* ttri_us) {
+    if (ttri_n)  *ttri_n  = s_stat_ttri_n;
+    if (ttri_us) *ttri_us = s_stat_ttri_us;
 }
 
 void scene_render(se_render_mode_t mode) {

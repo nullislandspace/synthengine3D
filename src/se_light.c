@@ -44,11 +44,10 @@ bool se_light_get(se_light_t* out) {
     return true;
 }
 
-uint32_t se_light_shade_tri(uint32_t argb,
-                            float x0, float y0, float z0,
-                            float x1, float y1, float z1,
-                            float x2, float y2, float z2,
-                            float camx, float camy, float camz) {
+float se_light_face_shade(float x0, float y0, float z0,
+                          float x1, float y1, float z1,
+                          float x2, float y2, float z2,
+                          float camx, float camy, float camz) {
     // Geometric normal: the cross product of two edges. Its length is
     // twice the triangle's area, which is irrelevant here -- only the
     // direction matters, and the normalisation below divides it out.
@@ -72,10 +71,10 @@ uint32_t se_light_shade_tri(uint32_t argb,
     float const l2 = lx * lx + ly * ly + lz * lz;
     // A degenerate triangle has no normal, and a light sitting exactly
     // on a face has no direction. Either way there is nothing to shade
-    // by, so hand back the colour unchanged instead of dividing by ~0.
+    // by, so leave the colour at full strength instead of dividing by ~0.
     float const denom2 = n2 * l2;
     if (denom2 < 1e-24f) {
-        return argb;
+        return 1.0f;
     }
 
     // cos(angle between the face and the direction to the light). One
@@ -94,10 +93,19 @@ uint32_t se_light_shade_tri(uint32_t argb,
     float d = ndotl / sqrtf(denom2);
     if (d < 0.0f) d = 0.0f;   // turned away: the global term alone
 
-    float const shade = s_floor + s_range * d;
+    return s_floor + s_range * d;
+}
+
+uint32_t se_light_shade_tri(uint32_t argb,
+                            float x0, float y0, float z0,
+                            float x1, float y1, float z1,
+                            float x2, float y2, float z2,
+                            float camx, float camy, float camz) {
+    float const shade = se_light_face_shade(x0, y0, z0, x1, y1, z1, x2, y2, z2, camx, camy, camz);
 
     // Scale RGB, keep alpha. shade is in [0, 1], so no channel can
-    // exceed its input and the result needs no saturation.
+    // exceed its input and the result needs no saturation. (A degenerate
+    // face gives exactly 1.0, which hands every channel back unchanged.)
     uint32_t const a = (argb >> 24) & 0xFF;
     uint32_t const r = (uint32_t)((float)((argb >> 16) & 0xFF) * shade);
     uint32_t const g = (uint32_t)((float)((argb >> 8) & 0xFF) * shade);

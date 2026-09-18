@@ -16,6 +16,7 @@
 
 #include "pax_gfx.h"
 #include "se_config.h"   // RENDER_* projection params (overridable)
+#include "se_texture.h"  // se_texture_t (scene_textured_tri)
 
 // Depth-buffered 3D scene pipeline.
 //
@@ -112,6 +113,40 @@ void scene_tri(float x0, float y0, float z0,
 void scene_line(float x0, float y0, float z0,
                 float x1, float y1, float z1, uint32_t argb);
 
+// --- Textured triangles -------------------------------------------------
+//
+// A third primitive, alongside scene_tri and scene_line (both unchanged):
+// a triangle that samples a texture (se_texture.h) instead of carrying
+// one flat colour. Submitted, projected and deferred the same way, into
+// a list of its own, and rasterized after the flat triangles and before
+// the edges, depth-tested per pixel against both. So textured and flat
+// geometry occlude each other correctly in either order of submission,
+// and outlines still draw over textured faces.
+//
+// Each vertex carries a texture coordinate (u, v) as well as its world
+// position. (0, 0) is the texture's top-left corner and (1, 1) its
+// bottom-right. Values outside 0..1 repeat the texture, so a plate can
+// tile across a large face. Mapping is PERSPECTIVE-CORRECT: u, v are
+// interpolated as u/z and v/z and divided per pixel, so a texture on a
+// face seen at an angle does not swim as the face turns. Sampling is
+// nearest-texel, with no filtering and no mipmaps.
+//
+// Lighting (se_light.h) applies exactly as it does to scene_tri: the
+// same per-face shade, computed once here at submit time from the same
+// world-space normal, modulates every texel of the face. Unlike a flat
+// triangle, where the shade is folded into the one colour, a textured
+// face keeps it as a separate factor quantised to 1/32 steps. That is
+// finer than an RGB565 channel can show at full brightness anyway.
+//
+// `tex` NULL drops the triangle. The texture must stay loaded until the
+// frame that used it has been rasterized (see se_texture_unload).
+typedef struct {
+    float x, y, z;   // world position
+    float u, v;      // texture coordinate; 0..1 spans the texture once
+} se_tex_vertex_t;
+
+void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex);
+
 // Rasterize the whole accumulated frame (triangles then edges) with the
 // chosen algorithm, then empty the lists. Call once after all geometry
 // for the frame has been submitted. The central cull + order passes run
@@ -140,6 +175,13 @@ void scene_rasterize(se_render_mode_t mode);
 // filled triangles and wireframe edges, in microseconds. For profiling how
 // scene render time divides; any pointer may be NULL.
 void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_us);
+
+// The same diagnostic for the textured-triangle pass: how many were
+// rasterized in the most recent scene_rasterize() (post-cull), and how
+// long that pass took. Kept apart from scene_raster_stats(), whose
+// tri_n / tri_us go on meaning flat triangles only. Either pointer may
+// be NULL.
+void scene_textured_stats(int* ttri_n, int64_t* ttri_us);
 
 // --- Camera & projection ---------------------------------------------
 //
@@ -319,6 +361,22 @@ typedef struct {
     uint16_t packed;
 } se_seg_t;
 
+// A textured triangle as the rasterizer sees it. Per vertex: screen
+// position and w = 1/z as in se_vtx_t, plus the texture coordinate
+// premultiplied by w and already scaled to texels (uw = u * tex->w * w).
+// u*w and v*w are what interpolate linearly across the projected
+// triangle; divide by the interpolated w to recover the texel.
+typedef struct {
+    float sx, sy, w;   // as se_vtx_t
+    float uw, vw;      // texel u, v times w
+} se_tvtx_t;
+
+typedef struct {
+    se_tvtx_t           v[3];
+    se_texture_t const* tex;
+    uint8_t             shade;  // light factor, 0..32 (32 = full colour)
+} se_ttri_t;
+
 typedef struct {
     se_tri_t const* tris;        // triangles for this frame (post-cull)
     int             tri_n;
@@ -328,9 +386,19 @@ typedef struct {
     uint32_t*       depth;       // (stamp << 16) | depth, indexed like fb
     uint16_t        frame;       // current frame stamp
     float           depth_scale; // multiply a vertex w by this to encode
+    se_ttri_t const* ttris;      // textured triangles for this frame (post-cull)
+    int             ttri_n;
 } se_geometry_t;
 
 // Snapshot the current frame's geometry + targets. Call from inside a
 // renderer callback; the pointers are owned by the engine and stay valid
 // only for that call.
 se_geometry_t se_scene_geometry(void);
+
+// Draw this frame's textured triangles with the engine's own textured
+// path, for a custom renderer that has no texturing of its own. Call it
+// from the renderer's rasterize() AFTER the flat triangles have written
+// their depth and BEFORE the edges, which is the order the built-in
+// renderers use. It depth-tests against, and writes, the shared depth
+// plane, so it composes with whatever the renderer drew.
+void se_scene_raster_textured(void);
