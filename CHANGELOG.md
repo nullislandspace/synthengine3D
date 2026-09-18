@@ -13,7 +13,7 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
-## [2.0] — unreleased (branch V1.5)
+## [2.0] — unreleased (branch V2.0)
 
 ### Migrating from 1.x
 
@@ -34,8 +34,14 @@ release.
 - **`scene_tri(x0..z2, argb, flags)`.** A flag word rather than a boolean, so
   later per-triangle options fit without changing the signature again.
   Undefined bits are reserved and must be 0.
-- **`se_geometry_t` gained `ttris` / `ttri_n`** (appended), so custom renderers
-  can see textured triangles.
+- **`se_geometry_t` gained `ttris` / `ttri_n` and `pts` / `pt_n`** (appended),
+  so custom renderers can see textured triangles and points.
+- **Near-plane clipping.** A triangle crossing `RENDER_NEAR_CLIP_Z` is now
+  clipped to it (one or two triangles, texture coordinates interpolated,
+  lighting of the original face kept) instead of having its behind-plane
+  vertices clamped onto the plane, which distorted it. An edge crossing the
+  plane is shortened to it. Primitives entirely in front of the plane are
+  unaffected, bit for bit. A clipped triangle can take two list entries.
 
 ### Added — `se_scene.h` (triangle flags)
 
@@ -52,6 +58,18 @@ release.
   time** from the world-space normal. `two_sided` makes it independent of
   winding. No shadows, falloff or specular. Off until set, and then costs a
   load and a branch per triangle.
+
+### Added — `se_scene.h` (points)
+
+- **`scene_point(x, y, z, argb)`** — a single world-space pixel, e.g. for a
+  starfield: projected with the camera, unlit, depth-tested against the
+  triangles but never written to depth, drawn after the edges. Culled at
+  submit time (behind the near plane, outside the viewport).
+- **`se_pt_t`**, **`se_scene_raster_points()`** (for custom renderers; the
+  built-in ones call it last), **`scene_point_stats()`**.
+- **`SE_SCENE_POINT_CAP`** (`se_config.h`, default 1024): the list is
+  allocated in PSRAM on the first `scene_point()`, so games that never call it
+  pay nothing.
 
 ### Added — `se_texture.h` and textured triangles
 

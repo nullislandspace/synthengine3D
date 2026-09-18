@@ -243,8 +243,9 @@
 #ifndef RENDER_CAM_Y
 #define RENDER_CAM_Y        1.0f    // camera's resting (grounded) height
 #endif
-// Near-plane z below which the projection blows up; geometry is clamped
-// to it and wholly-behind triangles/edges are dropped.
+// The near plane, in camera-space z. Triangles and edges that cross it
+// are clipped to it (a triangle becomes one or two), wholly-behind ones
+// are dropped, and so are points behind it.
 #ifndef RENDER_NEAR_CLIP_Z
 #define RENDER_NEAR_CLIP_Z  0.5f
 #endif
@@ -266,4 +267,15 @@
 // triangles, exactly as the flat list does.
 #ifndef SE_SCENE_TEXTURED_TRI_CAP
 #define SE_SCENE_TEXTURED_TRI_CAP  1024
+#endif
+
+// ---- Points (scene_point, se_scene.h) --------------------------------
+//
+// Points one frame can hold (e.g. a starfield). The list costs nothing
+// until the first scene_point(); it is then allocated in PSRAM (it is
+// only written once and read once per frame, sequentially, so it does not
+// need scarce internal SRAM). ~16 bytes each. Overflow drops the extra
+// points, as the other lists do.
+#ifndef SE_SCENE_POINT_CAP
+#define SE_SCENE_POINT_CAP  1024
 #endif

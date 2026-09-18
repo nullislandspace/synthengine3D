@@ -155,6 +155,11 @@ static se_ttri_t*   s_ttris       = NULL;
 static int          s_ttri_n      = 0;
 static bool         s_ttri_failed = false;   // allocation failed: stop retrying
 
+// Points (scene_point): allocated on first use, in PSRAM (se_config.h).
+static se_pt_t*     s_pts         = NULL;
+static int          s_pt_n        = 0;
+static bool         s_pt_failed   = false;
+
 static uint16_t*    s_fb      = NULL;
 static bool         s_rev     = false;
 static uint16_t     s_frame   = 0;      // current frame tag (never 0 while live)
@@ -167,6 +172,8 @@ static int64_t      s_stat_tri_us  = 0;
 static int64_t      s_stat_line_us = 0;
 static int          s_stat_ttri_n  = 0;
 static int64_t      s_stat_ttri_us = 0;
+static int          s_stat_pt_n    = 0;
+static int64_t      s_stat_pt_us   = 0;
 
 // Optional render passes (frustum cull / depth order). Both default OFF
 // so scene_render() is behaviour- and byte-identical to the no-op cut
@@ -214,6 +221,7 @@ void scene_begin(pax_buf_t* fb) {
     s_tri_n  = 0;
     s_line_n = 0;
     s_ttri_n = 0;
+    s_pt_n   = 0;
     // Advance the frame tag; skip 0 so a zero-initialised stamp cell
     // is never mistaken for "written this frame".
     s_frame++;
@@ -243,9 +251,8 @@ bool scene_textured_reserve(void) {
 // --- Projection ---------------------------------------------------------------
 
 // Project a *camera-space* point (right, up, forward) to (screen x,
-// screen y, 1/z). Forward-z is clamped to the near plane the same way
-// the old per-object renderers clamped world-z, so the projection can't
-// blow up and the visual result matches the pre-z-buffer pipeline. The
+// screen y, 1/z). Callers clip to the near plane first (clip_near), so
+// the clamp below is only a guard against a division blowing up. The
 // world->camera rotate+translate is done once by camera_transform()
 // before this, so a vertex shared between the near cull and the
 // projection is transformed only once.
@@ -603,40 +610,101 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     }
 }
 
+// --- Near-plane clipping ------------------------------------------------------
+//
+// A primitive that lies partly behind the near plane is CLIPPED to it,
+// not squashed: the part in front is kept at its true shape, the part
+// behind is cut away. (Clamping each behind-plane vertex onto the plane,
+// as the projection guard in scene_project_cam would, keeps its x/y and
+// so bends the triangle out of shape -- and its texture with it -- the
+// moment a camera flies close past geometry.) Primitives entirely in
+// front take the unchanged fast path, so their output is bit-identical
+// to what it was before clipping existed.
+
+// A camera-space vertex plus the texture coordinate the clip carries
+// along (unused, and left at 0, for flat triangles).
+typedef struct {
+    float x, y, z;
+    float u, v;
+} clip_vtx_t;
+
+// Clip a camera-space triangle against z >= RENDER_NEAR_CLIP_Z (one
+// Sutherland-Hodgman pass). Writes the surviving polygon to `out`, in the
+// same winding order, and returns its vertex count: 3 when two vertices
+// were behind, 4 when one was, 0 when all three were. Each new vertex
+// lies exactly on the plane, interpolated along the edge it cuts;
+// position and texture coordinate are both affine along a camera-space
+// edge, so the interpolation is exact.
+static int clip_near(clip_vtx_t const in[3], clip_vtx_t out[4]) {
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        clip_vtx_t const* a    = &in[i];
+        clip_vtx_t const* b    = &in[i == 2 ? 0 : i + 1];
+        bool const        a_in = a->z >= RENDER_NEAR_CLIP_Z;
+        bool const        b_in = b->z >= RENDER_NEAR_CLIP_Z;
+        if (a_in) out[n++] = *a;
+        if (a_in != b_in) {
+            float const t = (RENDER_NEAR_CLIP_Z - a->z) / (b->z - a->z);
+            out[n++] = (clip_vtx_t){
+                a->x + (b->x - a->x) * t, a->y + (b->y - a->y) * t, RENDER_NEAR_CLIP_Z,
+                a->u + (b->u - a->u) * t, a->v + (b->v - a->v) * t,
+            };
+        }
+    }
+    return n;
+}
+
+static inline int clip_behind_count(clip_vtx_t const c[3]) {
+    return (c[0].z < RENDER_NEAR_CLIP_Z) + (c[1].z < RENDER_NEAR_CLIP_Z) + (c[2].z < RENDER_NEAR_CLIP_Z);
+}
+
 // --- Public submit / flush ----------------------------------------------------
+
+// Append one projected flat triangle (all vertices at or in front of the
+// near plane).
+static void emit_tri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const* c, uint16_t packed) {
+    if (s_tri_n >= SCENE_TRI_CAP) return;   // overflow: drop extra tris
+    scene_tri_t* t = &s_tris[s_tri_n++];
+    scene_project_cam(a->x, a->y, a->z, &t->v[0]);
+    scene_project_cam(b->x, b->y, b->z, &t->v[1]);
+    scene_project_cam(c->x, c->y, c->z, &t->v[2]);
+    t->packed = packed;
+}
 
 void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
                float x2, float y2, float z2, uint32_t argb, uint32_t flags) {
     if (!s_tris) return;
-    float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
-    camera_transform(x0, y0, z0, &c0x, &c0y, &c0z);
-    camera_transform(x1, y1, z1, &c1x, &c1y, &c1z);
-    camera_transform(x2, y2, z2, &c2x, &c2y, &c2z);
-    // Whole-triangle near cull: drop it only if every vertex is behind
-    // the near plane in CAMERA space (so it is correct under any camera
-    // pose, not just the forward-looking default; otherwise the per-
-    // vertex clamp in scene_project_cam keeps the projection bounded).
-    // This is a projection guard, not the central frustum cull (that is
-    // scene_cull_pass, opt-in via scene_set_options).
-    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z && c2z < RENDER_NEAR_CLIP_Z) {
-        return;
-    }
-    if (s_tri_n >= SCENE_TRI_CAP) return;   // overflow: drop extra tris
-    scene_tri_t* t = &s_tris[s_tri_n++];
-    scene_project_cam(c0x, c0y, c0z, &t->v[0]);
-    scene_project_cam(c1x, c1y, c1z, &t->v[1]);
-    scene_project_cam(c2x, c2y, c2z, &t->v[2]);
-    // Lighting (se_light.h): shade the face once, here at submit time,
-    // from the WORLD-space vertices -- the light lives in world space,
-    // and by this point the camera-space copies are all that survive.
-    // Off by default, and then this is a load and a branch. An emissive
-    // triangle skips it and keeps the colour it was given.
+    clip_vtx_t c[3] = {{0}};
+    camera_transform(x0, y0, z0, &c[0].x, &c[0].y, &c[0].z);
+    camera_transform(x1, y1, z1, &c[1].x, &c[1].y, &c[1].z);
+    camera_transform(x2, y2, z2, &c[2].x, &c[2].y, &c[2].z);
+    // Entirely behind the near plane (in CAMERA space, so this is right
+    // under any camera pose): nothing to draw. This is not the central
+    // frustum cull (scene_cull_pass, opt-in via scene_set_options).
+    int const behind = clip_behind_count(c);
+    if (behind == 3) return;
+    if (behind == 0 && s_tri_n >= SCENE_TRI_CAP) return;   // overflow: skip the shading too
+
+    // Lighting (se_light.h): shade the face once, from the WORLD-space
+    // vertices -- the light lives in world space -- whatever clipping does
+    // to it below: the pieces of a clipped face share its normal. Off by
+    // default, and then this is a load and a branch. An emissive triangle
+    // skips it and keeps the colour it was given.
     if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
                                   s_camera.x, s_camera.y, s_camera.z);
     }
-    t->packed = direct_565_pack(argb, s_rev);
+    uint16_t const packed = direct_565_pack(argb, s_rev);
+
+    if (behind == 0) {
+        emit_tri(&c[0], &c[1], &c[2], packed);
+        return;
+    }
+    clip_vtx_t p[4];
+    int const  n = clip_near(c, p);
+    emit_tri(&p[0], &p[1], &p[2], packed);
+    if (n == 4) emit_tri(&p[0], &p[2], &p[3], packed);
 }
 
 void scene_line(float x0, float y0, float z0,
@@ -645,61 +713,149 @@ void scene_line(float x0, float y0, float z0,
     float c0x, c0y, c0z, c1x, c1y, c1z;
     camera_transform(x0, y0, z0, &c0x, &c0y, &c0z);
     camera_transform(x1, y1, z1, &c1x, &c1y, &c1z);
-    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z) return;
+    bool const in0 = c0z >= RENDER_NEAR_CLIP_Z;
+    bool const in1 = c1z >= RENDER_NEAR_CLIP_Z;
+    if (!in0 && !in1) return;
     if (s_line_n >= SCENE_LINE_CAP) return;
+    if (!in0 || !in1) {
+        // Crossing the near plane: move the endpoint behind it onto the
+        // plane, along the line.
+        float const t = (RENDER_NEAR_CLIP_Z - c0z) / (c1z - c0z);
+        float const x = c0x + (c1x - c0x) * t;
+        float const y = c0y + (c1y - c0y) * t;
+        if (in0) {
+            c1x = x; c1y = y; c1z = RENDER_NEAR_CLIP_Z;
+        } else {
+            c0x = x; c0y = y; c0z = RENDER_NEAR_CLIP_Z;
+        }
+    }
     scene_seg_t* seg = &s_lines[s_line_n++];
     scene_project_cam(c0x, c0y, c0z, &seg->v[0]);
     scene_project_cam(c1x, c1y, c1z, &seg->v[1]);
     seg->packed = direct_565_pack(argb, s_rev);
 }
 
+// Append one projected textured triangle (all vertices at or in front of
+// the near plane). `ush` / `vsh` are the whole texture periods the
+// original triangle's coordinates were shifted by (see below), so every
+// piece of a clipped triangle maps the texture exactly as the whole did.
+static void emit_ttri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const* c,
+                      se_texture_t const* tex, float ush, float vsh, uint8_t shade) {
+    if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;   // overflow: drop, as scene_tri does
+    se_ttri_t* t = &s_ttris[s_ttri_n++];
+    clip_vtx_t const* const q[3] = {a, b, c};
+    float const tw = (float)tex->w, th = (float)tex->h;
+    for (int i = 0; i < 3; i++) {
+        scene_vtx_t p;
+        scene_project_cam(q[i]->x, q[i]->y, q[i]->z, &p);
+        t->v[i].sx = p.sx;
+        t->v[i].sy = p.sy;
+        t->v[i].w  = p.w;
+        t->v[i].uw = (q[i]->u - ush) * tw * p.w;
+        t->v[i].vw = (q[i]->v - vsh) * th * p.w;
+    }
+    t->tex   = tex;
+    t->shade = shade;
+}
+
 void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uint32_t flags) {
     if (v == NULL || tex == NULL || tex->texels == NULL) return;
     if (s_ttris == NULL && !scene_textured_reserve()) return;
-    float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
-    camera_transform(v[0].x, v[0].y, v[0].z, &c0x, &c0y, &c0z);
-    camera_transform(v[1].x, v[1].y, v[1].z, &c1x, &c1y, &c1z);
-    camera_transform(v[2].x, v[2].y, v[2].z, &c2x, &c2y, &c2z);
-    // Same whole-triangle near cull as scene_tri.
-    if (c0z < RENDER_NEAR_CLIP_Z && c1z < RENDER_NEAR_CLIP_Z && c2z < RENDER_NEAR_CLIP_Z) {
-        return;
+    clip_vtx_t c[3];
+    for (int i = 0; i < 3; i++) {
+        camera_transform(v[i].x, v[i].y, v[i].z, &c[i].x, &c[i].y, &c[i].z);
+        c[i].u = v[i].u;
+        c[i].v = v[i].v;
     }
-    if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;   // overflow: drop, as scene_tri does
-    se_ttri_t* t = &s_ttris[s_ttri_n++];
-    scene_vtx_t p[3];
-    scene_project_cam(c0x, c0y, c0z, &p[0]);
-    scene_project_cam(c1x, c1y, c1z, &p[1]);
-    scene_project_cam(c2x, c2y, c2z, &p[2]);
+    // Same near handling as scene_tri.
+    int const behind = clip_behind_count(c);
+    if (behind == 3) return;
+    if (behind == 0 && s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;
 
     // Shift the coordinates by whole texture periods so all three are
     // >= 0. Repeating makes that invisible, and it lets the rasterizer
     // turn a texel coordinate into an index by truncating to int, which
-    // only rounds the right way (down) for non-negative values.
+    // only rounds the right way (down) for non-negative values. Taken
+    // from the ORIGINAL corners: a clipped piece's coordinates are
+    // interpolated between them, so they stay >= the same minimum.
     float umin = v[0].u, vmin = v[0].v;
     if (v[1].u < umin) umin = v[1].u;
     if (v[2].u < umin) umin = v[2].u;
     if (v[1].v < vmin) vmin = v[1].v;
     if (v[2].v < vmin) vmin = v[2].v;
     float const ush = floorf(umin), vsh = floorf(vmin);
-    float const tw = (float)tex->w, th = (float)tex->h;
-    for (int i = 0; i < 3; i++) {
-        t->v[i].sx = p[i].sx;
-        t->v[i].sy = p[i].sy;
-        t->v[i].w  = p[i].w;
-        t->v[i].uw = (v[i].u - ush) * tw * p[i].w;
-        t->v[i].vw = (v[i].v - vsh) * th * p[i].w;
-    }
-    t->tex = tex;
 
     // Lighting (se_light.h): the same per-face shade scene_tri applies,
     // from the same world-space vertices, but kept as a factor because
     // there is no single colour to fold it into. Emissive: full strength.
-    t->shade = 32;
+    uint8_t shade = 32;
     if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         float const sh = se_light_face_shade(v[0].x, v[0].y, v[0].z, v[1].x, v[1].y, v[1].z,
                                              v[2].x, v[2].y, v[2].z, s_camera.x, s_camera.y, s_camera.z);
-        t->shade = (uint8_t)(sh * 32.0f + 0.5f);
+        shade = (uint8_t)(sh * 32.0f + 0.5f);
     }
+
+    if (behind == 0) {
+        emit_ttri(&c[0], &c[1], &c[2], tex, ush, vsh, shade);
+        return;
+    }
+    clip_vtx_t p[4];
+    int const  n = clip_near(c, p);
+    emit_ttri(&p[0], &p[1], &p[2], tex, ush, vsh, shade);
+    if (n == 4) emit_ttri(&p[0], &p[2], &p[3], tex, ush, vsh, shade);
+}
+
+// --- Points -------------------------------------------------------------------
+
+static bool scene_points_reserve(void) {
+    if (s_pts != NULL) return true;
+    if (s_pt_failed) return false;
+    size_t const sz = (size_t)SE_SCENE_POINT_CAP * sizeof(se_pt_t);
+    s_pts = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+    if (s_pts == NULL) {
+        ESP_LOGE(TAG, "point list allocation failed (%u bytes)", (unsigned)sz);
+        s_pt_failed = true;
+        return false;
+    }
+    ESP_LOGI(TAG, "point list: PSRAM (%uKB, %d points)", (unsigned)(sz / 1024), SE_SCENE_POINT_CAP);
+    return true;
+}
+
+void scene_point(float x, float y, float z, uint32_t argb) {
+    if (s_pts == NULL && !scene_points_reserve()) return;
+    float cx, cy, cz;
+    camera_transform(x, y, z, &cx, &cy, &cz);
+    if (cz < RENDER_NEAR_CLIP_Z) return;
+    scene_vtx_t p;
+    scene_project_cam(cx, cy, cz, &p);
+    // One pixel has nothing to clip: cull it here, against the viewport,
+    // instead of carrying it through the cull pass.
+    int const px = (int)lroundf(p.sx), py = (int)lroundf(p.sy);
+    if (px < s_vp_x0 || px > s_vp_x1 || py < s_vp_y0 || py > s_vp_y1) return;
+    if (s_pt_n >= SE_SCENE_POINT_CAP) return;   // overflow: drop, as the other lists do
+    se_pt_t* pt = &s_pts[s_pt_n++];
+    pt->v       = p;
+    pt->packed  = direct_565_pack(argb, s_rev);
+}
+
+// Depth-tested, never depth-writing single pixels (as the edges, without
+// their bias: a point is not drawn over a face it belongs to).
+void se_scene_raster_points(void) {
+    if (s_pts == NULL || s_fb == NULL || s_ds == NULL) return;
+    int64_t const  t0    = esp_timer_get_time();
+    uint16_t const frame = s_frame;
+    for (int i = 0; i < s_pt_n; i++) {
+        se_pt_t const* pt = &s_pts[i];
+        int const      x  = (int)lroundf(pt->v.sx), y = (int)lroundf(pt->v.sy);
+        if (x < s_vp_x0 || x > s_vp_x1 || y < s_vp_y0 || y > s_vp_y1) continue;
+        int const      idx    = direct_565_logical_index(x, y);
+        uint32_t const cell   = s_ds[idx];
+        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        int            di     = (int)(pt->v.w * SCENE_DEPTH_SCALE);
+        if (di < 0) di = 0;
+        if ((uint16_t)di >= stored) s_fb[idx] = pt->packed;
+    }
+    s_stat_pt_us = esp_timer_get_time() - t0;
 }
 
 // --- Deferred render: cull -> order -> rasterize ------------------------------
@@ -875,6 +1031,8 @@ static void zbuf_rasterize(void* user) {
     int64_t const t_r2 = esp_timer_get_time();
     s_stat_tri_us  = t_r1 - t_r0;
     s_stat_line_us = t_r2 - t_r1b;
+    // Points last, over everything (timed inside, like the textured pass).
+    se_scene_raster_points();
 }
 
 // =====================================================================
@@ -1159,6 +1317,8 @@ static void raycast_rasterize(void* user) {
     int64_t const t_r2 = esp_timer_get_time();
     s_stat_tri_us  = t_r1 - t_r0;
     s_stat_line_us = t_r2 - t_r1b;
+    // Points last, over everything (timed inside, like the textured pass).
+    se_scene_raster_points();
 }
 
 // =====================================================================
@@ -1210,6 +1370,8 @@ se_geometry_t se_scene_geometry(void) {
         .depth_scale = SCENE_DEPTH_SCALE,
         .ttris       = s_ttris,
         .ttri_n      = s_ttri_n,
+        .pts         = s_pts,
+        .pt_n        = s_pt_n,
     };
 }
 
@@ -1233,6 +1395,8 @@ void scene_rasterize(se_render_mode_t mode) {
     s_stat_line_n = s_line_n;
     s_stat_ttri_n  = s_ttri_n;
     s_stat_ttri_us = 0;   // stays 0 if a custom renderer skips the textured pass
+    s_stat_pt_n    = s_pt_n;
+    s_stat_pt_us   = 0;   // likewise for the point pass
 
     se_renderer_t const* const r = renderer_for(mode);
     r->rasterize(r->user);
@@ -1240,6 +1404,7 @@ void scene_rasterize(se_render_mode_t mode) {
     s_tri_n  = 0;
     s_line_n = 0;
     s_ttri_n = 0;
+    s_pt_n   = 0;
 }
 
 void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_us) {
@@ -1252,6 +1417,11 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
 void scene_textured_stats(int* ttri_n, int64_t* ttri_us) {
     if (ttri_n)  *ttri_n  = s_stat_ttri_n;
     if (ttri_us) *ttri_us = s_stat_ttri_us;
+}
+
+void scene_point_stats(int* pt_n, int64_t* pt_us) {
+    if (pt_n)  *pt_n  = s_stat_pt_n;
+    if (pt_us) *pt_us = s_stat_pt_us;
 }
 
 void scene_render(se_render_mode_t mode) {

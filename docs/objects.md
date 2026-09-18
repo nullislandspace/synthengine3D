@@ -89,3 +89,14 @@ The frame is fill-bound, so per instance the cost is *(visible triangles)* fills
 which edges get an outline. Watch the FPS counter when many instances are on
 screen; the `scene_tri`/`scene_line` buffers cap at 4096 each and silently drop
 the overflow.
+
+## Points (starfields and the like)
+
+`scene_point(x, y, z, argb)` submits a single pixel at a world position:
+unlit, depth-tested against the triangles (so geometry hides it), never
+written to depth, drawn after everything else. For stars that should behave as
+if infinitely far away, submit each one at the **camera position plus a fixed
+unit direction times a large distance** (e.g. 1000; anything below ~30000
+still depth-tests). They then turn with the camera but never move with it.
+Points behind the camera or outside the viewport are dropped at submit time;
+the list holds `SE_SCENE_POINT_CAP` (1024) per frame.

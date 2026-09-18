@@ -68,8 +68,9 @@ the game sorting anything.
 
 ### Deferred pipeline
 
-`scene_tri` / `scene_line` do **not** draw on the call. They project with the
-current camera and **accumulate** into per-frame triangle / edge lists;
+`scene_tri` / `scene_line` / `scene_textured_tri` / `scene_point` do **not**
+draw on the call. They project with the current camera and **accumulate** into
+per-frame lists;
 `scene_render()` does all the rasterization at once. Holding the whole frame is
 what lets the engine own the algorithm and cull / order the geometry centrally
 without any game call site changing:
@@ -79,9 +80,23 @@ submit ─▶ [tri list] [edge list] ─▶ scene_render: cull ─▶ order ─�
                                                   (opt-in)(opt-in) (z-buffer)
 ```
 
-`se_render_mode_t` selects the algorithm; today only `SE_RENDER_ZBUFFER`
-(= `SE_RENDER_DEFAULT`) ships. A whole-triangle near-clip guard stays in
-`scene_tri` (it bounds the projection; it is not the central cull).
+`se_render_mode_t` selects the algorithm: `SE_RENDER_ZBUFFER`
+(= `SE_RENDER_DEFAULT`) or `SE_RENDER_RAYCAST`, or one a game registers.
+
+**Near-plane clipping** happens at submit time, in camera space, against
+`RENDER_NEAR_CLIP_Z` (it is not the central cull):
+
+- A triangle wholly in front goes into the list as is.
+- A triangle wholly behind is dropped.
+- A triangle that crosses the plane is **clipped** to it and becomes one or
+  two triangles. Texture coordinates are interpolated along the cut edges and
+  the lighting of the original face is kept.
+- An edge that crosses the plane has its far-side endpoint moved onto the
+  plane. A point behind it is dropped.
+
+So a camera can fly close past (or through) geometry without triangles
+distorting. Before 2.0, a behind-plane vertex was clamped onto the plane
+instead, which bent a straddling triangle out of shape.
 
 ### Two-phase render (`scene_prepare` / `scene_rasterize`)
 
@@ -148,7 +163,10 @@ and safe regardless of winding. Keep it game-side.
 
 **Buffer caps & placement.** The triangle and edge lists are fixed buffers
 (`SCENE_TRI_CAP` / `SCENE_LINE_CAP`, 4096 each); submitting past a cap silently
-drops the extra geometry. A few thousand triangles is well within budget. They
+drops the extra geometry. The textured-triangle and point lists are allocated on
+first use (`SE_SCENE_TEXTURED_TRI_CAP` 1024, `SE_SCENE_POINT_CAP` 1024; the
+point list always in PSRAM) and overflow the same way. A clipped triangle can
+take two entries. A few thousand triangles is well within budget. They
 are allocated in **internal SRAM** (with a PSRAM fallback if internal RAM is
 too tight) — `scene_init()` logs which it got. Internal placement is what makes
 the `scene_prepare()` overlap pay off: the emit/cull/order passes work the
@@ -178,10 +196,11 @@ never matches a live frame.
 
 ## What the engine does and doesn't do
 
-- **Does:** projection through a 6-DOF camera, the near-clip guard, per-pixel
+- **Does:** projection through a 6-DOF camera, near-plane clipping, per-pixel
   depth test + write, flat-shaded triangle fill, perspective-correct textured
   triangles ([`se_texture.h`](../include/se_texture.h), see below),
-  depth-biased wireframe, opt-in frustum cull + front-to-back ordering, opt-in
+  depth-biased wireframe, depth-tested points (`scene_point`: 1 px, unlit,
+  drawn last, never written to depth -- e.g. a starfield), opt-in frustum cull + front-to-back ordering, opt-in
   single-light shading ([`se_light.h`](../include/se_light.h), see below).
 - **Doesn't (yet / by design):** texture filtering or mipmaps, transparency,
   per-vertex colour, more than one light, shadows, distance falloff, specular,

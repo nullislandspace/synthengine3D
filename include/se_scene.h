@@ -130,6 +130,16 @@ void scene_tri(float x0, float y0, float z0,
 void scene_line(float x0, float y0, float z0,
                 float x1, float y1, float z1, uint32_t argb);
 
+// Submit a world-space point: one pixel of `argb`, for starfields,
+// sparks and the like. Projected like any vertex, so it moves correctly
+// with the camera; unlit, like an edge. Depth-tested against the
+// triangles (hidden behind them) but never written to the depth buffer.
+// Drawn after the edges. Points behind the near plane or outside the
+// viewport are dropped at submit time. A star "at infinity" is a point
+// at the camera position plus a fixed direction times a large distance
+// (anything up to ~30000 units still depth-tests correctly).
+void scene_point(float x, float y, float z, uint32_t argb);
+
 // --- Textured triangles -------------------------------------------------
 //
 // A third primitive, alongside scene_tri and scene_line (both unchanged):
@@ -201,6 +211,11 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
 // tri_n / tri_us go on meaning flat triangles only. Either pointer may
 // be NULL.
 void scene_textured_stats(int* ttri_n, int64_t* ttri_us);
+
+// The same for points: how many were drawn in the most recent
+// scene_rasterize() and how long the point pass took. Either pointer may
+// be NULL.
+void scene_point_stats(int* pt_n, int64_t* pt_us);
 
 // --- Camera & projection ---------------------------------------------
 //
@@ -380,6 +395,11 @@ typedef struct {
     uint16_t packed;
 } se_seg_t;
 
+typedef struct {
+    se_vtx_t v;
+    uint16_t packed;
+} se_pt_t;
+
 // A textured triangle as the rasterizer sees it. Per vertex: screen
 // position and w = 1/z as in se_vtx_t, plus the texture coordinate
 // premultiplied by w and already scaled to texels (uw = u * tex->w * w).
@@ -407,6 +427,8 @@ typedef struct {
     float           depth_scale; // multiply a vertex w by this to encode
     se_ttri_t const* ttris;      // textured triangles for this frame (post-cull)
     int             ttri_n;
+    se_pt_t const*  pts;         // points for this frame (drawn after the edges)
+    int             pt_n;
 } se_geometry_t;
 
 // Snapshot the current frame's geometry + targets. Call from inside a
@@ -421,3 +443,9 @@ se_geometry_t se_scene_geometry(void);
 // renderers use. It depth-tests against, and writes, the shared depth
 // plane, so it composes with whatever the renderer drew.
 void se_scene_raster_textured(void);
+
+// Draw this frame's points with the engine's own point pass, for a custom
+// renderer. Call it from rasterize() last, after the edges, as the
+// built-in renderers do. It depth-tests against the shared depth plane
+// but never writes it.
+void se_scene_raster_points(void);
