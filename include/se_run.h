@@ -95,3 +95,23 @@ typedef struct {
 // time after the engine has bootstrapped (i.e. from on_init onward); a
 // no-op if `out` is NULL.
 void se_display_info(se_display_info_t* out);
+
+// Wallclock of the most recent present, split into its two halves, in
+// microseconds. Either pointer may be NULL.
+//
+//   blit_us   bsp_display_blit(): handing the finished back buffer to
+//             the LCD. Real transfer work, proportional to the screen,
+//             not to what was drawn.
+//   vsync_us  waiting for the panel's tearing-effect signal after the
+//             blit returned. Idle time. Near zero means the frame just
+//             made its refresh window; close to a whole refresh period
+//             means it just missed one and is waiting for the next.
+//             About 50 ms (the wait's timeout) means the signal never
+//             came. Without a tearing-effect line it is the fixed 16 ms
+//             fallback delay.
+//
+// The present runs after on_render returns, so a call from on_render
+// reports the previous frame's present -- the one that happened since
+// the last on_render. Read once per frame and accumulate for an average;
+// like scene_raster_stats(), this holds only the latest value.
+void se_present_stats(int64_t* blit_us, int64_t* vsync_us);

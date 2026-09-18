@@ -134,14 +134,27 @@ static void se_pump_input(se_app_callbacks_t const* cb, void* user) {
 // front (scanned out) and the previous front becomes the next back. The
 // CPU and any hardware block only ever touch *s_fb, never the buffer the
 // LCD is reading -- no tearing.
+//
+// Both halves are timed (se_present_stats): the blit is work, the vsync
+// wait is idle, and a game reading one lump "present" figure cannot tell
+// a slow transfer from a frame that just missed its refresh window.
+static int64_t s_present_blit_us  = 0;
+static int64_t s_present_vsync_us = 0;
+
 static void se_present(void) {
+    int64_t const t0 = esp_timer_get_time();
     bsp_display_blit(0, 0, s_di.width, s_di.height, pax_buf_get_pixels(s_fb));
+    int64_t const t1 = esp_timer_get_time();
 
     if (s_vsync_sem != NULL) {
         xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(50));
     } else {
         vTaskDelay(pdMS_TO_TICKS(16));
     }
+    int64_t const t2 = esp_timer_get_time();
+
+    s_present_blit_us  = t1 - t0;
+    s_present_vsync_us = t2 - t1;
 
     pax_buf_t* tmp = s_fb;
     s_fb           = s_fb_front;
@@ -154,6 +167,11 @@ static void se_present(void) {
 // splash screen). Gated on s_fb_a_px so a call made before se_run() has
 // bootstrapped reports "no frame" instead of handing out a zero-initialised
 // pax_buf_t.
+
+void se_present_stats(int64_t* blit_us, int64_t* vsync_us) {
+    if (blit_us != NULL) *blit_us = s_present_blit_us;
+    if (vsync_us != NULL) *vsync_us = s_present_vsync_us;
+}
 
 pax_buf_t* se_frame_back(void) {
     return (s_fb_a_px != NULL) ? s_fb : NULL;
