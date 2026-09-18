@@ -1,6 +1,6 @@
 // =====================================================================
 //  SynthEngine3D  --  PUBLIC STABLE API  --  audio source contracts
-//  Part of the semver'd public surface (see se_version.h). The vtable
+//  Part of the versioned public surface (see se_version.h). The vtable
 //  structs below are value-types that ARE the contract: games implement
 //  music_source_t / sfx_voice_t and hand them to the mixer (se_audio.h).
 // =====================================================================

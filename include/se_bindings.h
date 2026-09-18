@@ -13,7 +13,7 @@
 //  scancode is a complete, channel-independent identifier -- pollable for
 //  smooth steering and matchable against key events for edges.
 //
-//  Part of the semver'd public surface (see se_version.h).
+//  Part of the versioned public surface (see se_version.h).
 // =====================================================================
 
 #include <stdbool.h>

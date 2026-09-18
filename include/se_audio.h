@@ -1,7 +1,7 @@
 // =====================================================================
 //  SynthEngine3D  --  PUBLIC STABLE API  --  audio mixer
 // ---------------------------------------------------------------------
-//  Part of the semver'd public surface (see se_version.h). The mixer
+//  Part of the versioned public surface (see se_version.h). The mixer
 //  carries no app/NVS dependency: the host pushes per-class output gates
 //  via audio_mixer_set_*_enabled() rather than the mixer reading app
 //  settings. Implement music with se_audio_source.h's music_source_t

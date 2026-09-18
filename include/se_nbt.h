@@ -5,7 +5,7 @@
 //  A tiny tagged binary serializer (named/typed fields in nestable
 //  compounds) over a stdio FILE*, with an endianness-tagged header so
 //  files are portable. Used by se_save.h for slot files, but usable
-//  standalone for any structured persistence. Part of the semver'd
+//  standalone for any structured persistence. Part of the versioned
 //  public surface (see se_version.h).
 // =====================================================================
 

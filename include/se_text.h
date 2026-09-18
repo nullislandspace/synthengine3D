@@ -5,7 +5,7 @@
 //  Hershey vector-font text rendering. The glyph machinery and the
 //  inline stroke helpers are engine-internal (src/internal/hershey*.h);
 //  this header is the stable surface games draw text through. Part of
-//  the semver'd public API (see se_version.h).
+//  the versioned public API (see se_version.h).
 // =====================================================================
 
 #include "pax_gfx.h"

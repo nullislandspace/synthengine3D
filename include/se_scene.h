@@ -7,7 +7,7 @@
 //  triangles / wireframe edges; the engine projects, depth-tests and
 //  rasterizes them. The engine knows nothing about game objects — the
 //  game iterates its own world and calls scene_tri / scene_line. Part of
-//  the semver'd public surface (see se_version.h); projection constants
+//  the versioned public surface (see se_version.h); projection constants
 //  are overridable defaults in se_config.h.
 // =====================================================================
 
@@ -102,11 +102,28 @@ void scene_init(void);
 // scene_line.
 void scene_begin(pax_buf_t* fb);
 
+// --- Triangle flags ---------------------------------------------------
+//
+// A bit mask passed with every triangle, flat or textured. 0 is the
+// plain triangle: depth-tested, and lit if a light is set. Bits not
+// defined here are reserved -- pass them as 0, so that a later engine
+// can give them a meaning without changing what existing calls do.
+//
+//   SE_TRI_EMISSIVE  Never lit: the triangle keeps the exact colour (or
+//                    texels) it was given, at full strength, whatever
+//                    se_light_set() says. For things that give off light
+//                    rather than reflect it -- engine flames, lamps,
+//                    screens -- and for geometry the game has already
+//                    shaded itself. It costs less than a lit triangle,
+//                    since the per-face normal is skipped too.
+#define SE_TRI_EMISSIVE  (1u << 0)
+
 // Submit a world-space triangle. Projected with the current camera and
-// accumulated; rasterized at scene_render(). `argb` is ARGB8888.
+// accumulated; rasterized at scene_render(). `argb` is ARGB8888;
+// `flags` is a mask of SE_TRI_* bits (0 for a plain triangle).
 void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
-               float x2, float y2, float z2, uint32_t argb);
+               float x2, float y2, float z2, uint32_t argb, uint32_t flags);
 
 // Submit a world-space wireframe edge. Projected + accumulated; drawn at
 // scene_render() after every triangle.
@@ -137,6 +154,8 @@ void scene_line(float x0, float y0, float z0,
 // triangle, where the shade is folded into the one colour, a textured
 // face keeps it as a separate factor quantised to 1/32 steps. That is
 // finer than an RGB565 channel can show at full brightness anyway.
+// `flags` takes the same SE_TRI_* bits as scene_tri; SE_TRI_EMISSIVE
+// draws the texels unshaded.
 //
 // `tex` NULL drops the triangle. The texture must stay loaded until the
 // frame that used it has been rasterized (see se_texture_unload).
@@ -145,7 +164,7 @@ typedef struct {
     float u, v;      // texture coordinate; 0..1 spans the texture once
 } se_tex_vertex_t;
 
-void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex);
+void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uint32_t flags);
 
 // Rasterize the whole accumulated frame (triangles then edges) with the
 // chosen algorithm, then empty the lists. Call once after all geometry

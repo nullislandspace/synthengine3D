@@ -54,7 +54,7 @@ static void on_render(pax_buf_t* fb, void* user) {
     scene_tri(-c, 0.0f, 4.0f - s,            // base-left
                c, 0.0f, 4.0f + s,            // base-right
                0.0f, 2.0f, 4.0f,             // apex
-               0xFFFF31F1u);                 // magenta
+               0xFFFF31F1u, 0);              // magenta, no SE_TRI_* flags
 
     scene_render(SE_RENDER_ZBUFFER);         // rasterize the accumulated frame
 }

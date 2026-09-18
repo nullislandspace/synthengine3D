@@ -11,7 +11,7 @@
 //  Values that need no compile-time folding are configured at runtime
 //  through the relevant subsystem's init struct instead -- see docs/.
 //
-//  This header is part of the stable, semver'd public surface
+//  This header is part of the stable, versioned public surface
 //  (see se_version.h).
 // =====================================================================
 

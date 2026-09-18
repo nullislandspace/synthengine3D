@@ -7,7 +7,7 @@
 //  public header so callers (engine and game) inline them -- never move
 //  them behind a function-call or opaque-handle boundary. Display
 //  geometry comes from se_config.h (overridable). Part of the stable,
-//  semver'd surface (see se_version.h).
+//  versioned surface (see se_version.h).
 // =====================================================================
 
 #include <stdbool.h>

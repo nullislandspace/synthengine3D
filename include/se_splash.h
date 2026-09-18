@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------
 //  A short 3D title sequence the engine draws for itself: the wordmark
 //  as real 3D geometry, flying toward the camera and easing to a stop.
-//  Part of the semver'd public surface (see se_version.h).
+//  Part of the versioned public surface (see se_version.h).
 //
 //  This is a BLOCKING call with its own frame loop -- it draws and
 //  presents its own frames until the animation ends, then returns. Call

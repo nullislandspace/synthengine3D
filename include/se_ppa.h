@@ -1,7 +1,7 @@
 #pragma once
 // =====================================================================
 //  SynthEngine3D  --  se_ppa.h
-//  PUBLIC STABLE API  --  semver'd (see se_version.h)
+//  PUBLIC STABLE API  --  versioned (see se_version.h)
 // ---------------------------------------------------------------------
 //  Generic PPA (Pixel-Processing-Accelerator) blit helper for the
 //  ESP32-P4. Wraps the driver mechanics every Tanmatsu graceloader app

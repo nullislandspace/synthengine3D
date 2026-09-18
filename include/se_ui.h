@@ -12,7 +12,7 @@
 //
 //  This is the per-frame core: it composes with live content (e.g. a
 //  pause overlay drawn over a frozen scene). Theme + geometry come from
-//  SE_UI_* in se_config.h (override to reskin). Part of the semver'd
+//  SE_UI_* in se_config.h (override to reskin). Part of the versioned
 //  public surface (see se_version.h).
 //
 //  Rendering uses only the engine's own inline leaves (se_text vector

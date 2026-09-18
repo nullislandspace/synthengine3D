@@ -16,7 +16,7 @@ static void on_render(pax_buf_t* fb, void* user) {
     (void)user;
     render_set_camera(0.0f, 1.0f);
     scene_begin(fb);
-    scene_tri(-1, 0, 4,  1, 0, 4,  0, 2, 4, 0xFFFF31F1u);
+    scene_tri(-1, 0, 4,  1, 0, 4,  0, 2, 4, 0xFFFF31F1u, 0);
     scene_render(SE_RENDER_ZBUFFER);
 }
 
@@ -42,8 +42,8 @@ edges between `scene_begin()` and `scene_render()`:
 ```c
 render_set_camera(0.0f, 1.0f);                           // eye at x=0, height 1
 scene_begin(fb);
-scene_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, 0xFFRRGGBBu);   // filled, z-tested
-scene_line(x0,y0,z0, x1,y1,z1,           0xFFRRGGBBu);   // wireframe edge
+scene_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, 0xFFRRGGBBu, 0);   // filled, z-tested (flags 0)
+scene_line(x0,y0,z0, x1,y1,z1,           0xFFRRGGBBu);      // wireframe edge
 scene_render(SE_RENDER_ZBUFFER);                          // rasterize the frame
 ```
 

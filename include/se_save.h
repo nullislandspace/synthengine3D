@@ -11,7 +11,7 @@
 //
 //  The engine fills the peek's timestamp + format version automatically;
 //  the game supplies its name + version (once, in the config) and a
-//  display `info` string + save kind (per write). Part of the semver'd
+//  display `info` string + save kind (per write). Part of the versioned
 //  public surface (see se_version.h).
 // =====================================================================
 

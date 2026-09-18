@@ -1,22 +1,77 @@
 # Changelog
 
 All notable changes to SynthEngine3D's **public API** (everything under
-`include/`). The format follows [Keep a Changelog](https://keepachangelog.com/),
-and the project follows semantic versioning as defined in `se_version.h`:
+`include/`). The format follows [Keep a Changelog](https://keepachangelog.com/).
+Versions are two-part, **MAJOR.MINOR**, as defined in `se_version.h`:
 
-- **MAJOR** — incompatible public-API change (signatures, semantics, removed
-  symbols, changed public struct layout).
-- **MINOR** — backwards-compatible additions to the public API.
-- **PATCH** — internal-only changes (optimisation, refactor, bugfix) with no
-  public-API effect.
+- **MAJOR** — a game has to change: changed signatures or semantics, removed
+  symbols, changed public struct layout.
+- **MINOR** — everything else: backwards-compatible additions, and internal
+  changes (optimisation, refactor, bugfix) with no public-API effect.
 
-As of 1.0.0 the public surface is **frozen**: a breaking change to anything
-under `include/` requires a MAJOR bump. `src/` (including `src/internal/`)
-stays internal and may change at any patch release.
+Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
+`src/` (including `src/internal/`) stays internal and may change in any
+release.
 
-## [Unreleased]
+## [2.0] — unreleased (branch V1.5)
 
-> Nothing yet since 1.1.0.
+### Migrating from 1.x
+
+- **`scene_tri()` takes a new last argument, `uint32_t flags`.** Append `, 0`
+  to every call for exactly the old behaviour.
+- **`SE_VERSION_PATCH` is gone**, and `se_version_string()` returns `"2.0"`,
+  not `"2.0.0"`. Nothing else was renamed or removed.
+
+### Changed — versioning
+
+- **Two-part versions.** The patch number existed to signal "internal fix,
+  safe to take". Games pin the engine by submodule commit, so the commit log
+  already says that, and the number bought nothing. Internal fixes are now
+  MINOR releases.
+
+### Changed — `se_scene.h` (breaking)
+
+- **`scene_tri(x0..z2, argb, flags)`.** A flag word rather than a boolean, so
+  later per-triangle options fit without changing the signature again.
+  Undefined bits are reserved and must be 0.
+- **`se_geometry_t` gained `ttris` / `ttri_n`** (appended), so custom renderers
+  can see textured triangles.
+
+### Added — `se_scene.h` (triangle flags)
+
+- **`SE_TRI_EMISSIVE`** — the triangle is never lit and keeps its colour (or
+  texels) at full strength. For flames, lamps and screens, and for geometry the
+  game shaded itself. The engine's splash now submits with it, so a light set
+  before `se_splash()` no longer shades it twice.
+
+### Added — `se_light.h` (scene lighting)
+
+- **One optional positional light:** `se_light_set()` / `se_light_get()`.
+  `brightness` is the directional share of the total illumination
+  (`shade = (1 − brightness) + brightness · d`). Applied per face **at submit
+  time** from the world-space normal. `two_sided` makes it independent of
+  winding. No shadows, falloff or specular. Off until set, and then costs a
+  load and a branch per triangle.
+
+### Added — `se_texture.h` and textured triangles
+
+- **`se_texture_load(path, flags)` / `se_texture_unload(tex)`** — PNG via
+  libspng into RGB565. Power-of-two edges up to `SE_TEXTURE_MAX_DIM`; alpha
+  discarded. `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, with a
+  logged PSRAM fallback reported in `tex->internal`.
+- **`scene_textured_tri(v[3], tex, flags)`** — perspective-correct,
+  nearest-texel, repeating, lit like `scene_tri`. Drawn from a list of its own
+  (`SE_SCENE_TEXTURED_TRI_CAP`, allocated on the first texture load) after the
+  flat triangles and before the edges, depth-tested against both. Both built-in
+  renderers draw it. Custom renderers can call `se_scene_raster_textured()`.
+- **`scene_textured_stats()`** — count and wallclock of the textured pass.
+  `scene_raster_stats()` keeps meaning flat triangles only.
+
+### Added — `se_run.h`
+
+- **`se_present_stats(&blit_us, &vsync_us)`** — the present split into the
+  LCD blit and the wait for the tearing-effect signal, so a game can tell a
+  slow transfer from a frame that missed its refresh window.
 
 ## [1.1.0] — 2026-09-10
 

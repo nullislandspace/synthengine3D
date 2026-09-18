@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------
 //  The seam between se_light.c (which owns the light) and se_scene.c
 //  (which applies it in scene_tri). INTERNAL: not reachable from a
-//  game's include path and not covered by the semver contract.
+//  game's include path and not covered by the versioning contract.
 // =====================================================================
 
 #include <stdbool.h>

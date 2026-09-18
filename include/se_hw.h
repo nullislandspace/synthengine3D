@@ -16,7 +16,7 @@
 //  these directly under the framework -- they are public so a non-se_run
 //  host (or a settings menu, later) can drive them too.
 //
-//  Part of the semver'd public surface (see se_version.h).
+//  Part of the versioned public surface (see se_version.h).
 //
 //  Audio-jack policy:
 //    - read the persisted speaker volume when no jack is inserted, the

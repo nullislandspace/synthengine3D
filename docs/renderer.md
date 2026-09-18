@@ -45,11 +45,16 @@ a projected object); it uses the same pose.
 scene_init();                       // once at boot (se_run does this for you)
 
 scene_begin(fb);                    // per frame: bind fb, empty the z-buffer
-scene_tri(...);  scene_line(...);   // submit world-space geometry, any order
+scene_tri(..., 0);  scene_line(...);   // submit world-space geometry, any order
 scene_render(SE_RENDER_ZBUFFER);    // rasterize the whole frame, then reset
 ```
 
-- **`scene_tri(x0..z2, argb)`** — a filled, flat-shaded, depth-tested triangle.
+- **`scene_tri(x0..z2, argb, flags)`** — a filled, flat-shaded, depth-tested
+  triangle. `flags` is a mask of `SE_TRI_*` bits; 0 is a plain triangle. The one
+  defined so far is `SE_TRI_EMISSIVE`: the triangle is never lit and keeps its
+  colour at full strength, for flames, lamps, screens, or geometry the game has
+  shaded itself. Undefined bits are reserved and must be 0. `scene_textured_tri`
+  takes the same flags.
 - **`scene_line(x0..z1, argb)`** — a wireframe edge, depth-tested with a small
   bias so it wins against the coplanar face it outlines but loses to nearer
   geometry. (Hershey text mapped onto 3D surfaces is just a fan of these — see
@@ -229,7 +234,7 @@ se_tex_vertex_t const v[3] = {
     {x1, y1, z1, 1.0f, 0.0f},
     {x2, y2, z2, 0.0f, 1.0f},
 };
-scene_textured_tri(v, metal);
+scene_textured_tri(v, metal, 0);
 ```
 
 - **Textures** are PNGs, decoded by libspng (which graceloader carries) into
@@ -249,6 +254,7 @@ scene_textured_tri(v, metal);
   `se_geometry_t.ttris` and can call `se_scene_raster_textured()`.
 - **Lighting** applies as it does to flat triangles: the same per-face shade,
   computed at submit time, kept as a 0..32 factor and applied to each texel.
+  `SE_TRI_EMISSIVE` skips it, and the texels are drawn as loaded.
 - **Cost.** The divide and the texel fetch only happen for pixels that pass the
   depth test, but that is still far more work per pixel than a flat fill.
   `scene_textured_stats()` reports the pass separately from

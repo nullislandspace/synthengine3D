@@ -71,7 +71,7 @@ native port could drive the subsystems directly).
 
 ## Public vs internal
 
-- **`include/` is the entire public API.** Every `se_*.h` there is semver'd
+- **`include/` is the entire public API.** Every `se_*.h` there is versioned
   (see [the version policy](../CHANGELOG.md)). `synthengine3d.h` is the umbrella
   and the table of contents.
 - **`src/` (incl. `src/internal/`) is private.** Implementation files, the

@@ -3,7 +3,7 @@
 //  SynthEngine3D  --  INTERNAL  --  scene hooks for other engine files
 // ---------------------------------------------------------------------
 //  INTERNAL: not reachable from a game's include path and not covered
-//  by the semver contract.
+//  by the versioning contract.
 // =====================================================================
 
 #include <stdbool.h>

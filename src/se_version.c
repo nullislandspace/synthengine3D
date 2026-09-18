@@ -5,6 +5,5 @@
 
 char const* se_version_string(void) {
     return SE__STR(SE_VERSION_MAJOR) "."
-           SE__STR(SE_VERSION_MINOR) "."
-           SE__STR(SE_VERSION_PATCH);
+           SE__STR(SE_VERSION_MINOR);
 }

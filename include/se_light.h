@@ -3,20 +3,25 @@
 //  SynthEngine3D  --  PUBLIC STABLE API  --  scene lighting
 // ---------------------------------------------------------------------
 //  One optional positional light for the scene pipeline. When a light is
-//  set, scene_tri() shades every triangle it accepts: it derives the
-//  face's geometric normal from the world-space vertices it was handed,
-//  works out how squarely that face meets the light, and scales the
-//  colour the game passed before storing it. When no light is set the
-//  engine stores that colour untouched -- exactly as it did before this
-//  facility existed -- so lighting costs nothing until a game asks for
-//  it. Part of the semver'd public surface (see se_version.h).
+//  set, scene_tri() and scene_textured_tri() shade every triangle they
+//  accept: the face's geometric normal comes from the world-space
+//  vertices they were handed, and how squarely that face meets the light
+//  scales the colour (or the texels). When no light is set the engine
+//  stores the colour untouched -- exactly as it did before this facility
+//  existed -- so lighting costs nothing until a game asks for it. Part of
+//  the versioned public surface (see se_version.h).
 //
-//  ONCE PER FRAME, AT SUBMIT TIME. The shade is computed per triangle in
-//  scene_tri, not per pixel in the rasterizer: a triangle is one flat
-//  colour on screen, so per-pixel work would buy nothing. That also
-//  keeps the result available as a per-face quantity for later passes
-//  (texturing) to modulate, rather than something buried in the inner
-//  rasterizer loop.
+//  NOT EVERYTHING IS LIT. A triangle submitted with SE_TRI_EMISSIVE
+//  (se_scene.h) skips the light entirely and keeps its colour at full
+//  strength -- for things that give off light rather than reflect it
+//  (engine flames, lamps) and for geometry the game shaded itself (the
+//  engine's own splash does this).
+//
+//  ONCE PER FRAME, AT SUBMIT TIME. The shade is computed per triangle
+//  when it is submitted, not per pixel in the rasterizer: a triangle is
+//  one flat colour on screen (or one shade over its texels), so per-pixel
+//  work would buy nothing. It also means the light in effect is whichever
+//  was set when each triangle went in.
 //
 //  WHAT THIS IS NOT: there are no shadows. The light reaches every face
 //  that points at it, whether or not another object stands in between.

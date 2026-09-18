@@ -38,7 +38,7 @@ for (each tri t) {
     // back-face cull: CCW-outward normal n; skip if it faces away
     //   dot(n, camPos - faceCentre) <= 0  ->  skip   (camPos = {cam.x, cam.y, 0})
     // shade: pick a colour for the face (see below)
-    scene_tri(/* 3 world verts */, col_argb);
+    scene_tri(/* 3 world verts */, col_argb, 0);
 }
 
 // 3. feature edges (wireframe overlay)

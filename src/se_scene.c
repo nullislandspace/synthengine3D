@@ -607,7 +607,7 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
 
 void scene_tri(float x0, float y0, float z0,
                float x1, float y1, float z1,
-               float x2, float y2, float z2, uint32_t argb) {
+               float x2, float y2, float z2, uint32_t argb, uint32_t flags) {
     if (!s_tris) return;
     float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
     camera_transform(x0, y0, z0, &c0x, &c0y, &c0z);
@@ -630,8 +630,9 @@ void scene_tri(float x0, float y0, float z0,
     // Lighting (se_light.h): shade the face once, here at submit time,
     // from the WORLD-space vertices -- the light lives in world space,
     // and by this point the camera-space copies are all that survive.
-    // Off by default, and then this is a load and a branch.
-    if (se_light_is_on) {
+    // Off by default, and then this is a load and a branch. An emissive
+    // triangle skips it and keeps the colour it was given.
+    if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
                                   s_camera.x, s_camera.y, s_camera.z);
     }
@@ -652,7 +653,7 @@ void scene_line(float x0, float y0, float z0,
     seg->packed = direct_565_pack(argb, s_rev);
 }
 
-void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex) {
+void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uint32_t flags) {
     if (v == NULL || tex == NULL || tex->texels == NULL) return;
     if (s_ttris == NULL && !scene_textured_reserve()) return;
     float c0x, c0y, c0z, c1x, c1y, c1z, c2x, c2y, c2z;
@@ -692,9 +693,9 @@ void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex) {
 
     // Lighting (se_light.h): the same per-face shade scene_tri applies,
     // from the same world-space vertices, but kept as a factor because
-    // there is no single colour to fold it into.
+    // there is no single colour to fold it into. Emissive: full strength.
     t->shade = 32;
-    if (se_light_is_on) {
+    if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         float const sh = se_light_face_shade(v[0].x, v[0].y, v[0].z, v[1].x, v[1].y, v[1].z,
                                              v[2].x, v[2].y, v[2].z, s_camera.x, s_camera.y, s_camera.z);
         t->shade = (uint8_t)(sh * 32.0f + 0.5f);

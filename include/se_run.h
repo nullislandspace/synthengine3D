@@ -6,7 +6,7 @@
 //  once and the engine owns the frame loop, the device bootstrap, the
 //  input-queue pump, the device-global keys, vsync/blit, and the backdrop
 //  clear. The game plugs in via the callbacks below — it is content +
-//  per-frame logic, not loop plumbing. Part of the semver'd public surface
+//  per-frame logic, not loop plumbing. Part of the versioned public surface
 //  (see se_version.h). Overview + the frame lifecycle: docs/architecture.md;
 //  quick start: docs/getting-started.md.
 // =====================================================================

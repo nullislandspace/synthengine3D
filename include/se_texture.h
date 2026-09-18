@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------
 //  Load a PNG file into a texture the scene pipeline can map onto
 //  triangles (scene_textured_tri, se_scene.h), and free it again. Part of
-//  the semver'd public surface (see se_version.h).
+//  the versioned public surface (see se_version.h).
 //
 //  FORMAT. Texels are stored as RGB565 in the CPU's native byte order,
 //  one uint16 each, row-major -- the same colour depth as the

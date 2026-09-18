@@ -1,6 +1,6 @@
 // =====================================================================
 //  SynthEngine3D  --  PUBLIC STABLE API  --  procedural music source
-//  Part of the semver'd public surface (see se_version.h).
+//  Part of the versioned public surface (see se_version.h).
 // =====================================================================
 //
 // A seed-driven procedural music generator. The generator's *arrangement

@@ -1,6 +1,6 @@
 // =====================================================================
 //  SynthEngine3D  --  PUBLIC STABLE API  --  synth voices
-//  Part of the semver'd public surface (see se_version.h).
+//  Part of the versioned public surface (see se_version.h).
 // =====================================================================
 //
 // A *voice* is one playing note: you trigger it (note_on), optionally

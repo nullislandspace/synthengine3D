@@ -7,9 +7,9 @@ device settings and save files — so a game is *content + per-frame logic*, not
 boilerplate.
 
 Extracted from the game **Race the Synth**, which now consumes it as a git
-submodule like any other app. **1.0**: the public surface under `include/` is
-frozen and semver'd — minor versions may add to it, but breaking it requires a
-MAJOR bump.
+submodule like any other app. **2.0**: the public surface under `include/` is
+stable and versioned MAJOR.MINOR — minor versions may add to it, but breaking
+it requires a MAJOR bump.
 
 ---
 
@@ -56,7 +56,7 @@ static void on_render(pax_buf_t* fb, void* user) {
     float const c = cosf(s_angle), s = sinf(s_angle);
     // a triangle standing at z = 4, rotating about the vertical axis
     scene_tri(-c, 0.0f, 4.0f - s,   c, 0.0f, 4.0f + s,   0.0f, 2.0f, 4.0f,
-              0xFFFF31F1u);
+              0xFFFF31F1u, 0);
     scene_render(SE_RENDER_ZBUFFER);
 }
 
@@ -93,11 +93,13 @@ The same `CMakeLists.txt` builds two ways (see [`docs/integration.md`](docs/inte
 ## Public vs internal, stability, performance
 
 - **Public API = everything in `include/`** (the `se_*.h` headers + the
-  `synthengine3d.h` umbrella). This is the semver'd surface.
+  `synthengine3d.h` umbrella). This is the versioned surface.
 - **Internal = everything in `src/`** (including `src/internal/`). Never
-  include it from a game; it can change at any patch release.
-- **Semver** (`se_version.h`): MAJOR = incompatible public change, MINOR =
-  compatible additions, PATCH = internal-only. See [`CHANGELOG.md`](CHANGELOG.md).
+  include it from a game; it can change in any release.
+- **Versioning** (`se_version.h`): two parts. MAJOR = a game has to change
+  (incompatible public change), MINOR = everything else (compatible additions,
+  internal fixes). No patch number: games pin the engine by submodule commit.
+  See [`CHANGELOG.md`](CHANGELOG.md).
 - **Performance rule:** hot per-pixel leaves are `static inline` in public
   headers (`se_direct565.h`, `se_text.h`) and *must stay inline* — never move
   them behind a function-call/opaque boundary. Coarse, once-per-frame calls

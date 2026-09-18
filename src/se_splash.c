@@ -186,6 +186,10 @@ static uint32_t splash_shade(uint32_t argb, float k) {
 // likewise a block above eye level shows its BOTTOM face. Emitting the
 // other three would be invisible overdraw -- the engine has no back-face
 // culling, by design (se_scene.h: cull where the normals are known).
+//
+// Submitted SE_TRI_EMISSIVE: front / side / top ARE the splash's shading,
+// so a scene light a game happened to set before calling se_splash()
+// must not darken them a second time.
 static void splash_block(float cx, float cy, float z, float half, float depth,
                          uint32_t front, uint32_t side, uint32_t top) {
     float const x0 = cx - half, x1 = cx + half;
@@ -193,18 +197,18 @@ static void splash_block(float cx, float cy, float z, float half, float depth,
     float const zf = z - depth, zb = z + depth;   // zf is the nearer face
 
     // Near face -- always toward the eye.
-    scene_tri(x0, y0, zf,  x1, y0, zf,  x1, y1, zf, front);
-    scene_tri(x0, y0, zf,  x1, y1, zf,  x0, y1, zf, front);
+    scene_tri(x0, y0, zf,  x1, y0, zf,  x1, y1, zf, front, SE_TRI_EMISSIVE);
+    scene_tri(x0, y0, zf,  x1, y1, zf,  x0, y1, zf, front, SE_TRI_EMISSIVE);
 
     // The x-face turned back toward the camera axis.
     float const sx = (cx < 0.0f) ? x1 : x0;
-    scene_tri(sx, y0, zf,  sx, y1, zf,  sx, y1, zb, side);
-    scene_tri(sx, y0, zf,  sx, y1, zb,  sx, y0, zb, side);
+    scene_tri(sx, y0, zf,  sx, y1, zf,  sx, y1, zb, side, SE_TRI_EMISSIVE);
+    scene_tri(sx, y0, zf,  sx, y1, zb,  sx, y0, zb, side, SE_TRI_EMISSIVE);
 
     // Above the eye we see the underside; below it, the top.
     float const sy = (cy > 0.0f) ? y0 : y1;
-    scene_tri(x0, sy, zf,  x1, sy, zf,  x1, sy, zb, top);
-    scene_tri(x0, sy, zf,  x1, sy, zb,  x0, sy, zb, top);
+    scene_tri(x0, sy, zf,  x1, sy, zf,  x1, sy, zb, top, SE_TRI_EMISSIVE);
+    scene_tri(x0, sy, zf,  x1, sy, zb,  x0, sy, zb, top, SE_TRI_EMISSIVE);
 }
 
 // Emit a string as solid blocks: march every stroke at a constant arc

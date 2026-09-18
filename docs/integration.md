@@ -80,7 +80,8 @@ match.
 
 ## Versioning
 
-`se_version.h` carries `SE_VERSION_*` and `se_version_string()`. The public
-surface (`include/`) is semver'd; see [`../CHANGELOG.md`](../CHANGELOG.md) and
-the policy in `se_version.h`. Pre-1.0, pin to a known-good revision if you need
-stability while the API settles.
+`se_version.h` carries `SE_VERSION_MAJOR` / `SE_VERSION_MINOR` and
+`se_version_string()` ("2.0"). The public surface (`include/`) is versioned
+MAJOR.MINOR: MAJOR when a game has to change, MINOR for everything else. See
+[`../CHANGELOG.md`](../CHANGELOG.md) and the policy in `se_version.h`. A game
+pins the engine by submodule commit, so it only moves when you move it.
