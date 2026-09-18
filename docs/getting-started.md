@@ -44,6 +44,7 @@ render_set_camera(0.0f, 1.0f);                           // eye at x=0, height 1
 scene_begin(fb);
 scene_tri(x0,y0,z0, x1,y1,z1, x2,y2,z2, 0xFFRRGGBBu, 0);   // filled, z-tested (flags 0)
 scene_line(x0,y0,z0, x1,y1,z1,           0xFFRRGGBBu);      // wireframe edge
+scene_point(x,y,z,                       0xFFRRGGBBu);      // one pixel (e.g. a star)
 scene_render(SE_RENDER_ZBUFFER);                          // rasterize the frame
 ```
 
