@@ -27,6 +27,7 @@ later by `se_ppa_wait_job`):
 | `se_ppa_blit(fb, job_id, layer, dst_y_top)` | SRM (1:1) | copy a full-width layer cache into a band |
 | `se_ppa_blit_rect(fb, job_id, layer, sx, sy, w, h, dx, dy)` | SRM (1:1) | copy a `w×h` sub-rect of a layer to `(dx,dy)` |
 | `se_ppa_blend_key(fb, job_id, layer, dst_y_top, ck_lo, ck_hi)` | BLEND | composite a layer with a foreground colour-key |
+| `se_ppa_blit_scaled(fb, job_id, layer, factor)` | SRM (scaled) | the whole layer scaled up by an integer factor, at the top-left — the upscale of a quarter-resolution frame |
 
 Geometry and orientation are read off the `pax_buf_t` arguments — you think in
 **logical** (post-orientation) screen coordinates; the engine converts each
@@ -62,6 +63,13 @@ se_ppa_layer_flush(&sun);                              // …then flush once
 after the flush, so `se_ppa_layer_flush` is a one-shot, not a per-frame cost.
 `se_ppa_layer_free` reclaims one (most apps never bother — layers live for the
 session).
+
+A layer can also be a **per-frame target**: the quarter-resolution renderer
+draws the whole 3D frame into a half-size layer every frame and scales it up
+with `se_ppa_blit_scaled` ([renderer.md](renderer.md#quarter-resolution-scene_set_render_scale)).
+The PPA's scaler **interpolates** — there is no nearest-neighbour setting in the
+driver — so a 2× upscale comes out soft, not as crisp 2×2 blocks. A layer used
+this way needs `se_ppa_layer_sync` every frame (below), not the one-shot flush.
 
 ## Ordering & async
 
@@ -113,7 +121,19 @@ Simpler than it looks, because of *who writes what*:
 
 - **Layer caches** are CPU-drawn once → one **cache-to-memory flush**
   (`se_ppa_layer_flush`) pushes the pixels to PSRAM before the PPA's DMA reads
-  them. They never change after, so that's the only cache op in the pipeline.
+  them. They never change after, so that's the only cache op they need.
+- **A layer the CPU draws every frame and the PPA fills and reads** (the
+  quarter-resolution target: the PPA paints its backdrop, the CPU rasterizes
+  over it, the PPA scales it up) needs **`se_ppa_layer_sync`** after the CPU is
+  done and before the PPA reads it: it writes the CPU's pixels back **and drops
+  them from the cache**. The write-back is for the PPA's read; the drop is for
+  the next frame — at 192 KB the buffer is small enough to stay cached between
+  frames, and a stale cached line that the CPU later writes into and evicts
+  would overwrite the PPA's fill of the next frame.
+- **Reading what the PPA wrote.** After a PPA job wrote a buffer that the CPU
+  then *reads* (a screenshot or a video encoder reading the upscaled
+  framebuffer), wait for the job and call **`se_ppa_buf_invalidate`** so the
+  reads come from PSRAM, not from stale cache lines.
 - **The framebuffer** needs no per-frame flush or invalidate. PPA-vs-PPA
   ordering is handled by the waits, not cache ops (DMA peers are coherent with
   PSRAM). The subtle case is **PPA writes a region, then the CPU draws over
@@ -126,8 +146,8 @@ Simpler than it looks, because of *who writes what*:
   set (the framebuffer alone is 768 KB, plus the depth/stamp plane) far exceeds
   the L2 cache, so a full alternate-buffer frame flushes and evicts everything
   between two uses of the same buffer. An app whose per-frame working set fits
-  in L2, or that reads PPA output back to *use* it, would need an explicit
-  invalidate — not provided yet, by design (the proven path doesn't use one).
+  in L2, or that reads PPA output back to *use* it, needs the explicit calls
+  above.
 
 ## Threading
 

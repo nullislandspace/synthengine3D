@@ -1,4 +1,4 @@
-# Audio (`se_audio.h`, `se_audio_source.h`, `se_audio_dsp.h`, `se_voice.h`, `se_music_procedural.h`)
+# Audio (`se_audio.h`, `se_audio_source.h`, `se_audio_dsp.h`, `se_voice.h`, `se_music_procedural.h`, `se_mp3.h`)
 
 A software mixer that owns the BSP's single I2S channel and sums one **music**
 source plus N **SFX voices**. The pipeline is **22050 Hz, signed-16-bit,
@@ -88,7 +88,17 @@ check the headroom on paper.
 ## DSP primitives (`se_audio_dsp.h`)
 
 Building blocks for writing a source: oscillators, envelopes, a biquad filter.
-Use them inside your `render` callbacks. (See the header for the exact set.)
+Use them inside your `render` callbacks; everything runs at
+`AUDIO_SAMPLE_RATE_HZ`.
+
+| Group | Calls |
+|---|---|
+| Setup | `audio_dsp_init()` — builds the sine table; once, before the first `audio_dsp_sin()` |
+| Oscillators | `audio_dsp_phase_inc(hz)` gives a 32-bit phase increment; the caller advances its own phase and reads `audio_dsp_sin(phase)` (table lookup), `audio_dsp_saw()`, `audio_dsp_square()`, `audio_dsp_triangle()`, all in [-1, 1] |
+| Noise | `audio_dsp_noise(&state)` — white noise in [-1, 1] from a caller-owned `uint32_t` state |
+| Envelope (`audio_env_t`) | `audio_env_configure(e, attack_s, decay_s, sustain, release_s)`, `audio_env_trigger()`, `audio_env_release()`, `audio_env_tick()` (one sample, returns the level 0..1), `audio_env_is_idle()`, `audio_env_reset()` (straight to idle) |
+| Filter (`audio_biquad_t`) | `audio_biquad_lpf()` / `_hpf()` / `_bpf(f, fc, q)` configure (q ≈ 0.707 is flat), `audio_biquad_tick(f, x)` filters one sample, `audio_biquad_reset()` clears the history |
+| Output | `audio_dsp_to_s16(x)` — soft-clips a float sample (gently towards ±1, hard beyond ±1.5) into int16 |
 
 ## Voices (`se_voice.h`)
 
@@ -191,3 +201,32 @@ music_procedural_create(&MY_MUSIC, seed);   // your music, same arrangement
 point them at static storage that outlives the source. See the header for the
 full struct + the grid constants (`SE_MUSIC_TICKS_PER_BAR`,
 `SE_MUSIC_CHORDS_PER_SECTION`) the bank shapes use.
+
+## MP3 files (`se_mp3.h`)
+
+A second music source, so a game can offer "my own music" instead of the
+procedural one with no other change — both are a `music_source_t`, and the
+mixer neither knows nor cares which it holds:
+
+```c
+music_source_t* m = se_mp3_create(&(se_mp3_config_t){ .dir = "/sd/music", .shuffle = true, .loop = true });
+if (m) audio_mixer_set_music(m);   // NULL: missing directory / no files / no memory -- keep what you had
+```
+
+- **Config** (`cfg` may be NULL for all defaults): `dir` (scanned
+  non-recursively for `*.mp3`; NULL means `/sd/music`), `shuffle` (default off:
+  alphabetical), `loop` (default on; off goes silent after the last track).
+- **Ownership** passes to the mixer: `audio_mixer_set_music()` takes it and
+  frees it (stopping its decoder) when the music source is replaced or the
+  mixer shuts down. Do not free it yourself.
+- **While it plays:** `se_mp3_track_count()`, `se_mp3_track_name()` (the file
+  name of the track now playing) and `se_mp3_skip()` (the next track, within a
+  few audio chunks). They return 0 / `""` for a source that is not an MP3 one.
+- **How it keeps the mixer's contract** (no file I/O in `render()`, 22050 Hz
+  stereo): a decoder task reads the file, decodes it (minimp3, vendored),
+  resamples to 22050 Hz stereo and fills a ring buffer; `render()` only drains
+  the ring. If the decoder falls behind (a slow SD read), `render()` plays
+  silence for the gap rather than stalling the mixer.
+- **Cost:** a decoder task with a 32 KB stack, a ~64 KB PCM ring and a 16 KB
+  read buffer in PSRAM, and the CPU to decode. The task sits on the mixer's
+  core below the mixer's priority.

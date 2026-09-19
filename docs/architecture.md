@@ -56,11 +56,14 @@ Each subsystem is independent and has its own doc:
 - **Renderer** (`se_scene`) — [renderer.md](renderer.md). World-space geometry
   in, projected + z-buffered pixels out.
 - **Audio** (`se_audio` + sources + DSP) — [audio.md](audio.md). A mixer task
-  on the I2S channel; the game implements music/SFX sources.
+  on the I2S channel; the game implements music/SFX sources, or uses the
+  engine's procedural music or MP3 playlist sources.
 - **UI** (`se_ui`) + **bindings** (`se_bindings`) — [ui.md](ui.md).
 - **Save** (`se_save` + `se_nbt`) — [save.md](save.md).
-- **Device settings** (`se_hw`) — boot-apply + in-game get/set of the
-  launcher-shared volume + brightnesses.
+- **Device settings** (`se_hw`) — [ui.md](ui.md#device-settings-se_hwh).
+  Boot-apply + in-game get/set of the launcher-shared volume + brightnesses.
+- **PPA compositor** (`se_ppa`) — [ppa.md](ppa.md). Hardware fills, blits and
+  blends for backdrops and sprites, and the quarter-resolution upscale.
 - **Vector text** (`se_text`) and **framebuffer leaves** (`se_direct565`) —
   the drawing primitives the renderer and UI build on.
 

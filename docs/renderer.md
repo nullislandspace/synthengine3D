@@ -173,11 +173,122 @@ the `scene_prepare()` overlap pay off: the emit/cull/order passes work the
 lists off the PSRAM bus, so they run in true parallel with a concurrent PSRAM
 framebuffer blit instead of contending for it.
 
+## Viewport (`scene_set_viewport`)
+
+```c
+scene_set_viewport(&(se_viewport_t){ .x = 0, .y = 40, .w = 800, .h = 400 });
+se_viewport_t vp = scene_viewport();
+scene_set_viewport(NULL);   // back to the whole screen
+```
+
+Every rasterizer touches only pixels inside the rectangle (logical pixels;
+`w` / `h` are sizes), and `frustum_cull` culls against it, so a smaller
+viewport also culls more. It is persistent — not reset by `scene_begin()` —
+and it clips, it does not re-frame: the projection is still the `RENDER_*`
+pinhole, so an off-centre viewport shows an off-centre crop. Move the vanishing
+point with the `RENDER_*` overrides if the window needs it. It stays in
+full-screen pixels at quarter resolution.
+
+## Quarter resolution (`scene_set_render_scale`)
+
+For a scene that is fill-bound (a screen full of textured surfaces), the engine
+can render every other pixel of every other line — a quarter of the pixels —
+into a buffer half the size each way, which the game then scales up:
+
+```c
+// Once: a half-size buffer in the display's format and orientation.
+se_display_info_t di;
+se_display_info(&di);
+static se_ppa_layer_t half;
+se_ppa_layer_alloc(&half, DISPLAY_LOG_W / 2, DISPLAY_LOG_H / 2, di.pax_format, di.reversed, di.orientation);
+
+// Per frame (on_backdrop / on_render):
+scene_set_render_scale(2);          // latched by scene_begin()
+/* backdrop into half.buf */
+scene_begin(&half.buf);
+/* submit exactly as at full resolution */
+scene_prepare(SE_RENDER_ZBUFFER);
+scene_rasterize(SE_RENDER_ZBUFFER);
+se_ppa_layer_sync(&half);           // the CPU's pixels to PSRAM, out of the cache
+se_ppa_blit_scaled(fb, 0, &half, 2);
+se_ppa_wait_job(0);
+se_ppa_buf_invalidate(fb);          // only if the CPU reads fb afterwards (a screenshot)
+```
+
+- **Nothing else changes.** The camera, the `RENDER_*` projection, the
+  viewport (still in full-screen pixels), culling, near clipping and lighting
+  all work in full-screen coordinates. Only the projected positions are halved,
+  at the end of the projection, so pixel `(i, j)` of the half-size target is
+  exactly what full resolution draws at `(2i, 2j)` (up to float rounding).
+- **Per frame.** The scale is latched by `scene_begin()`, so a game can switch
+  between scenes or shots freely (`scene_render_scale()` reads back the
+  requested one); at scale 1 the output is bit for bit what it always was.
+- Lines and points stay one target pixel wide: two screen pixels.
+- The **raycast renderer** falls back to the z-buffer at quarter resolution
+  (its tiles are sized for the full screen). A custom renderer sees
+  `se_geometry_t.scale` and must address the half-size target itself.
+- **The upscale.** `se_ppa_blit_scaled()` runs on the PPA and costs the CPU
+  nothing, but the PPA's scaler **interpolates** (it has no nearest-neighbour
+  setting), so the pixels come out soft rather than as crisp 2×2 blocks. The
+  cache syncs are needed because the half-size buffer is small enough to stay
+  in the cache between frames (see [ppa.md](ppa.md#cache-coherency)).
+- **Cost.** In the showreel's block world, rasterizing fell to about a third
+  (138 → 40 ms in a textured walk; the per-triangle setup does not shrink);
+  the fills, the sync and the upscale add about 6.5 ms of waiting per frame.
+
+## Custom renderers (`se_renderer_register`)
+
+The resolve step is a seam: a game can register its own renderer and pass its
+handle to `scene_render()` / `scene_prepare()` / `scene_rasterize()` like a
+built-in, without touching a single `scene_tri` call site (cel shading,
+dithering, a depth-cued fog pass...).
+
+```c
+static void my_prepare(void* user)   { /* geometry only: NO framebuffer pixels */ }
+static void my_rasterize(void* user) {
+    se_geometry_t const g = se_scene_geometry();   // this frame's lists + targets
+    /* draw g.tris / g.segs into g.fb, depth-testing g.depth ... */
+    se_scene_raster_textured();                    // the engine's textured pass
+    se_scene_raster_points();                      // and its point pass, last
+}
+se_render_mode_t const MINE = se_renderer_register(&(se_renderer_t){
+    .name = "mine", .prepare = my_prepare, .rasterize = my_rasterize });
+```
+
+- The engine's cull and order passes run before `prepare()`, so a custom
+  renderer gets an already culled (and, if enabled, sorted) list.
+- `se_scene_geometry()` is only valid inside the callbacks. Vertices are in
+  screen space (`sx`, `sy`, and `w` = 1/z, larger is nearer; multiply by
+  `depth_scale` to encode). The depth plane is `(stamp << 16) | depth` per
+  pixel and never cleared: a cell counts only if its stamp equals `frame`.
+  At quarter resolution (`scale` 2) the target and the screen positions are
+  half size.
+- `se_renderer_name()` names a handle for logs (`"?"` if unknown). A full
+  table or a malformed renderer returns `SE_RENDER_DEFAULT`, so a caller that
+  ignores the result still renders.
+
+## Statistics
+
+For profiling, each of these reports the most recent `scene_rasterize()` (any
+pointer may be NULL):
+
+- `scene_raster_stats(&tri_n, &line_n, &tri_us, &line_us)` — flat triangles and
+  edges, post-cull.
+- `scene_textured_stats(&ttri_n, &ttri_us)` — the textured pass.
+- `scene_point_stats(&pt_n, &pt_us)` — the point pass.
+- `se_present_stats(&blit_us, &vsync_us)` ([`se_run.h`](../include/se_run.h)) —
+  the present after the frame: the LCD blit and the wait for the
+  tearing-effect signal. Read from `on_render`, it is the previous frame's.
+
 ## Depth buffer
 
 Depth is a scaled reciprocal-z (1/z), the quantity that interpolates linearly
 in screen space — so the per-pixel inner loop is one add, no divide. Larger
-encoded value = nearer.
+encoded value = nearer. It is stored as 16 bits, `64000 × RENDER_NEAR_CLIP_Z / z`,
+so the nearest drawable point always uses the full range: one depth step is
+about z² / (64000 × near), and nothing beyond z = 64000 × near is drawn (at
+the default near plane of 0.5, one step is 0.003 at z = 10 and 0.31 at
+z = 100; the far limit is 32000).
 
 The depth buffer is **never bulk-cleared**. A per-pixel "frame stamp" records
 which frame last wrote each depth; a depth counts only if its stamp is the
@@ -202,11 +313,8 @@ never matches a live frame.
   depth-biased wireframe, depth-tested points (`scene_point`: 1 px, unlit,
   drawn last, never written to depth -- e.g. a starfield), opt-in frustum cull + front-to-back ordering, opt-in
   single-light shading ([`se_light.h`](../include/se_light.h), see below).
-- **Quarter resolution** (`scene_set_render_scale(2)`): every other pixel of
-  every other line, into a half-size buffer the game scales up (the PPA does it
-  with `se_ppa_blit_scaled`, interpolating). Only the projected positions are
-  halved; everything before them stays in full-screen coordinates. About a
-  quarter of the fill cost, switchable per frame.
+- **Also:** a clipping viewport, quarter-resolution rendering and pluggable
+  renderers (sections below).
 - **Doesn't (yet / by design):** texture filtering or mipmaps, blended (partial) transparency,
   per-vertex colour, more than one light, shadows, distance falloff, specular,
   back-face culling (game-side, by design). **The game owns its object/world model** — the engine never sees
@@ -230,9 +338,11 @@ squarely the face meets the light:
 So a face square-on to the light keeps its full colour, and a face turned away
 falls to `1 - brightness` — never to black unless `brightness` is 1.0.
 
-Applied **per triangle in `scene_tri`, at submit time** — not per pixel. A
-triangle is one flat colour on screen, so per-pixel shading would buy nothing,
-and a per-face quantity is what a later texturing pass would want to modulate.
+Applied **per triangle in `scene_tri` (and `scene_textured_tri`), at submit
+time** — not per pixel. A triangle is one flat colour on screen, so per-pixel
+shading would buy nothing, and the textured pass modulates the same per-face
+value. The light can change every frame (a sunset); `se_light_get()` reads it
+back, and `se_light_set(NULL)` turns lighting off.
 The engine derives the normal from the world-space vertices it is handed, which
 is why `scene_tri` takes world space rather than pre-projected coordinates.
 
@@ -264,7 +374,10 @@ scene_textured_tri(v, metal, 0);
 - **Textures** are PNGs, decoded by libspng (which graceloader carries) into
   RGB565. Both edges must be a power of two, up to `SE_TEXTURE_MAX_DIM`.
   `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, falling back to PSRAM
-  (logged, and reported in `tex->internal`) if it won't fit.
+  (logged, and reported in `tex->internal`) if it won't fit. Load between
+  frames (it reads a file); `se_texture_unload()` frees one, but not while a
+  triangle submitted this frame still uses it (the texels are read at
+  rasterize time).
 - **Cut-out transparency.** Alpha is one bit: a texel with PNG alpha below 128
   is a hole, stored as `SE_TEXEL_CUTOUT`, and draws neither colour nor depth,
   so whatever is behind it shows through. For leaves, fences, grass sprites and
@@ -297,7 +410,12 @@ scene_textured_tri(v, metal, 0);
 
 - It's fill-bound: cost scales with on-screen pixels, not triangle count per
   se. Low-poly models, back-face culling game-side, and the opt-in
-  `frustum_cull` / `depth_order` passes are the levers.
+  `frustum_cull` / `depth_order` passes are the levers — and, for a scene that
+  fills the screen with textured surfaces, quarter resolution, which cuts the
+  rasterizing to roughly a third (per-triangle setup does not shrink).
+- Textured pixels cost several times flat ones (a divide and a texel fetch per
+  drawn pixel). Cut-out textures cost the same per pixel, but whatever shows
+  through their holes is drawn too.
 - The wireframe overlay hides the occasional 1-px seam from the non-sub-pixel
   triangle fill; a wireframe-free look would want a half-space rasteriser
   (not currently provided).

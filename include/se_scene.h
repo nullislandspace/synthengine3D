@@ -301,6 +301,10 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 // persistent setting, NOT reset by scene_begin() -- how a game frames its
 // view is a property of the game, not of the frame.
 //
+// It is given in full-screen pixels whatever the render scale; at
+// quarter resolution (scene_set_render_scale) the engine applies it to
+// the half-size target itself.
+//
 // The viewport clips; it does not scale or re-centre. The projection is
 // still the RENDER_* pinhole about RENDER_HALF_W / RENDER_HORIZON_Y, so
 // a viewport that is not centred on those shows an off-centre crop of
@@ -400,8 +404,10 @@ char const* se_renderer_name(se_render_mode_t mode);
 // multiplies w by `depth_scale`.
 //
 // The depth plane is one uint32 per pixel, (frame_stamp << 16) | depth,
-// indexed exactly like `fb` via direct_565_logical_index() from
-// se_direct565.h. A cell counts only if its high half equals `frame`;
+// indexed exactly like `fb`: via direct_565_logical_index() from
+// se_direct565.h at full resolution; at quarter resolution (`scale` 2)
+// the target is half size each way, so the index is
+// lx * (DISPLAY_RAW_STRIDE / 2) + (DISPLAY_RAW_W / 2 - 1 - ly). A cell counts only if its high half equals `frame`;
 // anything else is a stale cell from an earlier frame and must read as
 // infinitely far. This is what lets the engine skip clearing the depth
 // buffer -- do not memset it, and do not assume it is zero.

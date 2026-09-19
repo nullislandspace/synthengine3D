@@ -13,7 +13,7 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
-## [2.0] — unreleased (branch V2.0)
+## [2.0] — 2026-09-19
 
 ### Migrating from 1.x
 

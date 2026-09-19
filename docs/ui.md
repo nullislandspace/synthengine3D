@@ -112,3 +112,28 @@ A typical Controls menu pairs the two: a CUSTOM row per control draws the bound
 key (via the game's keycap drawer), and activating it calls `se_ui_capture_key`
 → `se_bindings_set`. The engine thus owns the storage, the persistence and the
 rebind UI; the game just declares its controls and queries the mapping.
+
+## Device settings (`se_hw.h`)
+
+The launcher-shared hardware settings — speaker / headphone volume and the
+display, keyboard and LED brightness — live in the launcher's `"system"` NVS
+namespace. `se_run()` applies them at boot (`se_hw_init()`) and handles the
+volume keys and the audio jack itself (`se_hw_step_volume()`,
+`se_hw_on_jack_event()`), so a game under the framework calls none of that.
+
+For an in-game settings menu (`SE_MENU_VAL_RANGE` slider rows), the accessors
+read and write the same values:
+
+```c
+uint8_t se_hw_get_volume(void);                 void se_hw_set_volume(uint8_t percent);
+uint8_t se_hw_get_display_brightness(void);     void se_hw_set_display_brightness(uint8_t percent);
+uint8_t se_hw_get_keyboard_brightness(void);    void se_hw_set_keyboard_brightness(uint8_t percent);
+uint8_t se_hw_get_led_brightness(void);         void se_hw_set_led_brightness(uint8_t percent);
+```
+
+Values are percentages (0..100). A setter clamps, persists to the shared NVS
+(so the launcher sees the change) and applies it at once. The volume is the
+*active* output's: the speaker's, or the headphones' while a jack is in (the
+speaker amplifier is muted then). The display brightness never goes below
+`SE_HW_DISPLAY_BRIGHTNESS_MIN`, so a slider cannot black the screen out;
+keyboard and LEDs may go to 0.

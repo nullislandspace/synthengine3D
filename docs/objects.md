@@ -15,8 +15,8 @@ draws correctly.
 
 ## Coordinate system + winding
 
-- World space is **x = lateral, y = up, z = forward** (into the screen); the
-  camera sits at z = 0 (see [renderer.md](renderer.md)).
+- World space is **x = lateral, y = up, z = forward** (into the screen). The
+  camera is a 6-DOF pinhole anywhere in it (see [renderer.md](renderer.md)).
 - Submit triangles **CCW-outward** (counter-clockwise when viewed from
   outside) and keep winding consistent across a model — that's what lets you
   back-face cull with a normal test. If you import from a Z-up tool, swap axes
@@ -25,7 +25,8 @@ draws correctly.
 ## The emit pattern
 
 A game object's "emit" transforms its model vertices to world space, then
-submits faces as `scene_tri` and feature edges as `scene_line`:
+submits faces as `scene_tri` (or `scene_textured_tri`, with texture
+coordinates per vertex) and feature edges as `scene_line`:
 
 ```c
 // 1. model -> world (place + scale the instance)
@@ -36,8 +37,8 @@ for (each vertex v)
 render_camera_t const cam = render_camera();
 for (each tri t) {
     // back-face cull: CCW-outward normal n; skip if it faces away
-    //   dot(n, camPos - faceCentre) <= 0  ->  skip   (camPos = {cam.x, cam.y, 0})
-    // shade: pick a colour for the face (see below)
+    //   dot(n, camPos - faceCentre) <= 0  ->  skip   (camPos = {cam.x, cam.y, cam.z})
+    // colour: the face's base colour (the engine light, if set, shades it)
     scene_tri(/* 3 world verts */, col_argb, 0);
 }
 
@@ -50,18 +51,23 @@ Submit **world-space geometry only — never project or rasterize yourself**. Th
 z-buffer resolves visibility, so you don't sort, and you can submit objects in
 any order.
 
-## Shading is the game's job
+## Shading and culling
 
-The renderer fills a triangle flat with the `argb` you pass — there's no
-lighting in the engine. Compute the colour yourself:
+The renderer fills a triangle flat with the `argb` you pass, shaded by the
+engine's one optional light when a game has set one ([`se_light.h`](../include/se_light.h),
+[renderer.md](renderer.md#lighting-se_lighth)): per face, at submit time.
 
-- **Back-face culling** (above) — drop faces pointing away from the camera.
-  *Optional* but worth it on a fill-bound device. (The engine's future central
-  cull will make this redundant; for now it's a game-side win.)
-- **Per-face lighting** — a cheap directional model reads well:
-  `tint = 0.55 + 0.45 * max(0, dot(n̂, L))` with a fixed light `L`, applied as a
-  channel-scale of the base fill. Draw emissive/"light" parts **flat** (no
-  tint) instead.
+- **Back-face culling** (above) is the game's — drop faces pointing away from
+  the camera. *Optional* but worth it on a fill-bound device. The engine's
+  `frustum_cull` pass drops off-screen geometry, not back faces: the engine
+  never knows which way a model's faces point.
+- **Lighting**: with `se_light_set()` the engine shades each face from its
+  world-space normal. Without it, or for a game that wants its own model, pass
+  the finished colour — a cheap directional one reads well:
+  `tint = 0.55 + 0.45 * max(0, dot(n̂, L))` as a channel scale of the base
+  fill.
+- **Emissive parts** (flames, lamps, screens) pass `SE_TRI_EMISSIVE`: never
+  lit, drawn at full strength.
 - **Time-based effects** (a pulsing beacon) read the clock in the emit and vary
   the colour — keep them out of the model data.
 
@@ -87,8 +93,10 @@ for the exact glyph format.)
 The frame is fill-bound, so per instance the cost is *(visible triangles)* fills
 + *(kept edges)* lines. Keep models low-poly, cull invisible faces, and trim
 which edges get an outline. Watch the FPS counter when many instances are on
-screen; the `scene_tri`/`scene_line` buffers cap at 4096 each and silently drop
-the overflow.
+screen; the `scene_tri`/`scene_line` buffers cap at 4096 each, the textured
+list at `SE_SCENE_TEXTURED_TRI_CAP` (1024 unless the game raises it), and they
+silently drop the overflow. A triangle clipped by the near plane can take two
+entries.
 
 ## Points (starfields and the like)
 

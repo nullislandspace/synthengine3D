@@ -15,6 +15,11 @@ Define the macro **before `se_config.h` is reached**, two ways:
   overrides in `magicnumbers.h`, which `#include`s `se_config.h` after its own
   `#define`s so game code sees the same values.
 - **`-D` on the compile command** — e.g. `target_compile_definitions(... -DRENDER_HORIZON_Y=300)`.
+  It must reach the **engine's** sources too, not just the game's: in the
+  plain-CMake build the engine is its own OBJECT library, so either
+  `add_compile_definitions(...)` before `add_subdirectory(synthengine3D)`, or
+  `target_compile_definitions(synthengine3d PRIVATE ...)`. A cap the engine
+  and the game disagree on is a silent bug.
 
 Because each macro is `#ifndef`-guarded, your define wins and the default is
 skipped. The macros fold into hot loops (the projection, the RGB565 leaves), so
@@ -47,6 +52,21 @@ leaves hardcode rotation + stride into their inner loops off these.
   drawable point always uses the full 16-bit range. A nearer plane costs depth
   precision everywhere (one step ≈ z² / (64000 × near)) and pulls the far limit
   in to z = 64000 × near.
+
+### Textures and list caps (`se_texture`, `se_scene`)
+- `SE_TEXTURE_MAX_DIM` — the largest texture edge (default 512; must be a
+  power of two). Also bounds the decode scratch: 4 bytes per texel, briefly, in
+  PSRAM.
+- `SE_SCENE_TEXTURED_TRI_CAP` — textured triangles per frame (default 1024,
+  ~68 bytes each). Allocated when the first texture loads, internal SRAM first,
+  PSRAM if that is too tight. Raise it for texture-heavy scenes (the showreel's
+  block world uses 2048); a triangle clipped at the near plane can take two
+  entries.
+- `SE_SCENE_POINT_CAP` — points per frame (default 1024, ~16 bytes each),
+  allocated in PSRAM on the first `scene_point()`.
+
+The flat-triangle and edge lists (4096 each) are fixed inside the engine and
+not overridable. Every list drops its overflow silently.
 
 ### Audio (`se_audio`)
 - `AUDIO_MUSIC_GAIN` / `AUDIO_SFX_GAIN` — master music-vs-SFX balance (Q15 at
