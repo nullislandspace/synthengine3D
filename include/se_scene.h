@@ -102,6 +102,30 @@ void scene_init(void);
 // scene_line.
 void scene_begin(pax_buf_t* fb);
 
+// --- Quarter-resolution rendering ------------------------------------
+//
+// scene_set_render_scale(2) renders the next frames at half the width
+// and half the height -- a quarter of the pixels, so about a quarter of
+// the rasterizing, which is what a fill-bound scene pays for. Nothing
+// else changes: the camera, the RENDER_* projection, the viewport (still
+// given in full-screen pixels), culling, clipping and lighting all work
+// in full-screen coordinates as before. Only the projected positions
+// are halved, so the target's pixel (i, j) is exactly what full
+// resolution would draw at (2i, 2j) -- every other pixel of every other
+// line, packed without the gaps.
+//
+// The fb given to scene_begin() must then be a buffer of
+// DISPLAY_LOG_W/2 x DISPLAY_LOG_H/2 logical pixels in the display's
+// format and orientation (e.g. an se_ppa_layer_t allocated that size),
+// which the game scales up onto the screen afterwards
+// (se_ppa_blit_scaled). Lines and points stay one target pixel wide, so
+// two screen pixels. The raycast renderer falls back to the z-buffer at
+// quarter resolution. Switch freely between frames: the scale is
+// latched by scene_begin(). 1 (the default) is full resolution; any
+// other value than 2 means 1.
+void scene_set_render_scale(int div);
+int  scene_render_scale(void);  // the scale requested for the next frame
+
 // --- Triangle flags ---------------------------------------------------
 //
 // A bit mask passed with every triangle, flat or textured. 0 is the
@@ -429,6 +453,8 @@ typedef struct {
     int             ttri_n;
     se_pt_t const*  pts;         // points for this frame (drawn after the edges)
     int             pt_n;
+    int             scale;       // this frame's render scale: 2 = quarter resolution --
+                                 // screen positions and fb are then half size (see above)
 } se_geometry_t;
 
 // Snapshot the current frame's geometry + targets. Call from inside a

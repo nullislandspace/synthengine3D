@@ -133,6 +133,27 @@ bool se_ppa_blit_rect(pax_buf_t* fb, uint32_t job_id, se_ppa_layer_t const* laye
                       int src_x, int src_y, int w, int h,
                       int dst_x, int dst_y);
 
+// BLIT the whole `layer` onto `fb` scaled up by the integer `factor` in
+// both directions, its top-left at the screen's: the upscale of a frame
+// rendered at quarter resolution (scene_set_render_scale). The layer's
+// logical size times `factor` must fit `fb`. Both buffers share
+// orientation. The CPU's drawing must be in memory first
+// (se_ppa_layer_sync), and anything the CPU reads from `fb` afterwards
+// must come from memory (se_ppa_buf_invalidate).
+bool se_ppa_blit_scaled(pax_buf_t* fb, uint32_t job_id, se_ppa_layer_t const* layer, int factor);
+
+// For a layer the CPU draws into every frame and the PPA reads (and may
+// also fill): write the CPU's pixels back to PSRAM AND drop them from the
+// cache, so the PPA reads the finished frame and the CPU's next frame
+// starts from what is in memory, not from stale cache lines. Call after
+// drawing, before the PPA job that reads the layer.
+void se_ppa_layer_sync(se_ppa_layer_t* layer);
+
+// After a PPA job wrote `buf` (and was waited for), drop `buf` from the
+// CPU's cache, so what the CPU reads next (a screenshot, an encoder) is
+// what the PPA wrote.
+void se_ppa_buf_invalidate(pax_buf_t* buf);
+
 // BLEND the whole `layer` over `fb` at logical `dst_y_top` with a
 // foreground colour-key: a foreground pixel whose PPA-expanded RGB888
 // value falls in the inclusive window [ck_lo, ck_hi] (each 0x00RRGGBB) is

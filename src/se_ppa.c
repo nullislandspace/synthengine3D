@@ -451,6 +451,83 @@ bool se_ppa_blit_rect(pax_buf_t* fb, uint32_t job_id, se_ppa_layer_t const* laye
     return ppa_enqueue(&job);
 }
 
+bool se_ppa_blit_scaled(pax_buf_t* fb, uint32_t job_id, se_ppa_layer_t const* layer, int factor) {
+    if (!s_inited || fb == NULL || layer == NULL || layer->pixels == NULL || factor < 1) {
+        return false;
+    }
+    pax_buf_t const* lb = &layer->buf;
+    int const        w  = pax_buf_get_width(lb), h = pax_buf_get_height(lb);
+    // The whole layer, and the block it becomes on the screen: the same
+    // orientation, so the raw block scales by `factor` both ways.
+    raw_blk_t const s = rect_to_raw((uint32_t)pax_buf_get_width_raw(lb), (uint32_t)pax_buf_get_height_raw(lb),
+                                    pax_buf_get_orientation(lb), 0, 0, w, h);
+    raw_blk_t const d = rect_to_raw((uint32_t)pax_buf_get_width_raw(fb), (uint32_t)pax_buf_get_height_raw(fb),
+                                    pax_buf_get_orientation(fb), 0, 0, w * factor, h * factor);
+    if (!s.ok || !d.ok) {
+        ESP_LOGW(TAG, "blit_scaled: %dx%d x%d unsupported/out of bounds", w, h, factor);
+        return false;
+    }
+    ppa_job_t job = {
+        .id   = job_id,
+        .type = PPA_JOB_SRM,
+        .cfg.srm = {
+            .in = {
+                .buffer         = layer->pixels,
+                .pic_w          = s.pic_w,
+                .pic_h          = s.pic_h,
+                .block_w        = s.block_w,
+                .block_h        = s.block_h,
+                .block_offset_x = s.block_offset_x,
+                .block_offset_y = s.block_offset_y,
+                .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .out = {
+                .buffer         = pax_buf_get_pixels_rw(fb),
+                .buffer_size    = pax_buf_get_size(fb),
+                .pic_w          = d.pic_w,
+                .pic_h          = d.pic_h,
+                .block_offset_x = d.block_offset_x,
+                .block_offset_y = d.block_offset_y,
+                .srm_cm         = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .rotation_angle    = PPA_SRM_ROTATION_ANGLE_0,
+            .scale_x           = (float)factor,
+            .scale_y           = (float)factor,
+            .mirror_x          = false,
+            .mirror_y          = false,
+            .rgb_swap          = false,
+            .byte_swap         = false,
+            .alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+            .mode              = PPA_TRANS_MODE_NON_BLOCKING,
+            .user_data         = NULL,
+        },
+    };
+    return ppa_enqueue(&job);
+}
+
+void se_ppa_layer_sync(se_ppa_layer_t* layer) {
+    if (layer == NULL || layer->pixels == NULL) {
+        return;
+    }
+    esp_err_t err = esp_cache_msync(layer->pixels, layer->size,
+                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                                        ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "layer_sync: esp_cache_msync failed: %d", err);
+    }
+}
+
+void se_ppa_buf_invalidate(pax_buf_t* buf) {
+    if (buf == NULL) {
+        return;
+    }
+    esp_err_t err = esp_cache_msync(pax_buf_get_pixels_rw(buf), pax_buf_get_size(buf),
+                                    ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "buf_invalidate: esp_cache_msync failed: %d", err);
+    }
+}
+
 bool se_ppa_blend_key(pax_buf_t* fb, uint32_t job_id, se_ppa_layer_t const* layer,
                       int dst_y_top, uint32_t ck_lo, uint32_t ck_hi) {
     if (!s_inited || fb == NULL || layer == NULL || layer->pixels == NULL) {

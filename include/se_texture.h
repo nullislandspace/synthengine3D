@@ -10,8 +10,18 @@
 //  one uint16 each, row-major -- the same colour depth as the
 //  framebuffer, so drawing one costs a lookup and not a conversion. The
 //  PNG may be any colour type or bit depth libspng can decode; it is
-//  converted to RGB565 on load, and ALPHA IS DISCARDED. There is no
-//  transparency: a texel is always drawn.
+//  converted to RGB565 on load.
+//
+//  CUT-OUT TRANSPARENCY. Alpha is reduced to one bit: a texel whose PNG
+//  alpha is below 128 is a HOLE, stored as the reserved value
+//  SE_TEXEL_CUTOUT, and the rasterizer draws neither its colour nor its
+//  depth -- what is behind shows through, and the depth test sorts it
+//  out, so cut-out triangles need no ordering. Opaque texels are drawn
+//  as always. There is no blending (partial alpha). An opaque texel
+//  that would convert to SE_TEXEL_CUTOUT itself is stored one blue step
+//  darker, so it stays drawn. A texture with at least one hole has
+//  `cutout` set; only those take the (slightly different) cut-out
+//  raster path, so opaque textures render exactly as before.
 //
 //  SIZE. Both edges must be a power of two, from 1 up to
 //  SE_TEXTURE_MAX_DIM (se_config.h). That is what lets the rasterizer
@@ -32,6 +42,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// The texel value that marks a hole (RGB565 magenta).
+#define SE_TEXEL_CUTOUT  0xF81Fu
+
 // Load flags, OR-ed together.
 #define SE_TEXTURE_INTERNAL  (1u << 0)   // texels in internal SRAM (PSRAM if it will not fit)
 
@@ -40,7 +53,8 @@ typedef struct {
     int       w, h;     // size in texels; both powers of two
     uint8_t   w_log2;   // log2(w): row stride as a shift
     bool      internal; // true if the texels ended up in internal SRAM
-    uint32_t  mean_argb;// average colour of the whole texture (ARGB8888)
+    uint32_t  mean_argb;// average colour of its opaque texels (ARGB8888)
+    bool      cutout;   // true if any texel is a hole (SE_TEXEL_CUTOUT)
 } se_texture_t;
 
 // Load the PNG at `path` (a full VFS path, e.g. "/sd/apps/my.app/metal.png")

@@ -202,7 +202,12 @@ never matches a live frame.
   depth-biased wireframe, depth-tested points (`scene_point`: 1 px, unlit,
   drawn last, never written to depth -- e.g. a starfield), opt-in frustum cull + front-to-back ordering, opt-in
   single-light shading ([`se_light.h`](../include/se_light.h), see below).
-- **Doesn't (yet / by design):** texture filtering or mipmaps, transparency,
+- **Quarter resolution** (`scene_set_render_scale(2)`): every other pixel of
+  every other line, into a half-size buffer the game scales up (the PPA does it
+  with `se_ppa_blit_scaled`, interpolating). Only the projected positions are
+  halved; everything before them stays in full-screen coordinates. About a
+  quarter of the fill cost, switchable per frame.
+- **Doesn't (yet / by design):** texture filtering or mipmaps, blended (partial) transparency,
   per-vertex colour, more than one light, shadows, distance falloff, specular,
   back-face culling (game-side, by design). **The game owns its object/world model** — the engine never sees
   "objects", only triangles and edges (see [objects.md](objects.md)).
@@ -257,9 +262,17 @@ scene_textured_tri(v, metal, 0);
 ```
 
 - **Textures** are PNGs, decoded by libspng (which graceloader carries) into
-  RGB565. Both edges must be a power of two, up to `SE_TEXTURE_MAX_DIM`; alpha
-  is discarded. `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, falling
-  back to PSRAM (logged, and reported in `tex->internal`) if it won't fit.
+  RGB565. Both edges must be a power of two, up to `SE_TEXTURE_MAX_DIM`.
+  `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, falling back to PSRAM
+  (logged, and reported in `tex->internal`) if it won't fit.
+- **Cut-out transparency.** Alpha is one bit: a texel with PNG alpha below 128
+  is a hole, stored as `SE_TEXEL_CUTOUT`, and draws neither colour nor depth,
+  so whatever is behind it shows through. For leaves, fences, grass sprites and
+  window frames. No sorting is needed: the depth test handles the rest. There
+  is no blending. Only textures with a hole (`tex->cutout`) take the cut-out
+  loop, which fetches the texel before writing; opaque textures run the
+  unchanged loop, so their output is bit for bit what it was. `mean_argb`
+  averages the opaque texels only.
 - **Coordinates:** `(0,0)` is the texture's top-left, `(1,1)` its bottom-right,
   and anything outside repeats. Mapping is perspective-correct: `u·w` and `v·w`
   interpolate linearly and are divided by `w` per drawn pixel. Sampling is

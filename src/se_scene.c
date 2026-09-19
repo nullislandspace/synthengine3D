@@ -222,7 +222,41 @@ void scene_init(void) {
     memset(s_ds, 0, SCENE_PIXELS * sizeof(uint32_t));
 }
 
+// --- Render scale ---------------------------------------------------------------
+//
+// Quarter-resolution rendering (scene_set_render_scale): everything up to
+// the projection is unchanged -- camera, projection constants, viewport,
+// culling and clipping all stay in full-screen coordinates -- and the
+// projected screen position is then halved, so the rasterizers sample
+// every other pixel and every other line of the full-resolution image
+// and write them, without the gaps, into a buffer half the size each
+// way. At scale 1 nothing below changes, bit for bit.
+static int s_div_next = 1;  // requested; latched at scene_begin()
+static int s_div      = 1;  // this frame's
+static int s_raw_w      = DISPLAY_RAW_W;       // this frame's target, raw width
+static int s_raw_stride = DISPLAY_RAW_STRIDE;  // ... and stride (pixels)
+
+// scene_index() for this frame's target (the full panel, or
+// the half-size buffer): same rotated layout, smaller stride and width.
+static inline int scene_index(int lx, int ly) {
+    return lx * s_raw_stride + (s_raw_w - 1 - ly);
+}
+
+static void viewport_apply(void);
+
+void scene_set_render_scale(int div) {
+    s_div_next = div == 2 ? 2 : 1;
+}
+
+int scene_render_scale(void) {
+    return s_div_next;
+}
+
 void scene_begin(pax_buf_t* fb) {
+    s_div        = s_div_next;
+    s_raw_w      = DISPLAY_RAW_W / s_div;
+    s_raw_stride = DISPLAY_RAW_STRIDE / s_div;
+    viewport_apply();
     s_fb     = (uint16_t*)pax_buf_get_pixels(fb);
     s_rev    = fb->reverse_endianness;
     s_tri_n  = 0;
@@ -269,6 +303,10 @@ static inline void scene_project_cam(float cx, float cy, float cz, scene_vtx_t* 
     out->sx = RENDER_HALF_W    + RENDER_FOCAL_LEN * cx * inv_z;
     out->sy = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * cy * inv_z;
     out->w  = inv_z;
+    if (s_div != 1) {  // quarter resolution: pixel (i, j) samples (2i, 2j)
+        out->sx *= 0.5f;
+        out->sy *= 0.5f;
+    }
 }
 
 // --- Viewport -----------------------------------------------------------------
@@ -278,17 +316,40 @@ static inline void scene_project_cam(float cx, float cy, float cz, scene_vtx_t* 
 // pre-viewport engine exactly. Deliberately NOT reset by scene_begin():
 // it is a persistent property of how the game frames its 3D view, like
 // the projection, not a per-frame one.
-static int s_vp_x0 = 0;
-static int s_vp_y0 = 0;
-static int s_vp_x1 = DISPLAY_LOG_W - 1;
-static int s_vp_y1 = DISPLAY_LOG_H - 1;
+//
+// The game's rectangle is kept in full-screen pixels (s_uvp_*); the
+// rasterizers and the cull pass read s_vp_*, the same rectangle in this
+// frame's target pixels (halved at quarter resolution: the target pixels
+// whose full-screen sample falls inside it).
+static int s_uvp_x0 = 0;
+static int s_uvp_y0 = 0;
+static int s_uvp_x1 = DISPLAY_LOG_W - 1;
+static int s_uvp_y1 = DISPLAY_LOG_H - 1;
+static int s_vp_x0  = 0;
+static int s_vp_y0  = 0;
+static int s_vp_x1  = DISPLAY_LOG_W - 1;
+static int s_vp_y1  = DISPLAY_LOG_H - 1;
+
+static void viewport_apply(void) {
+    if (s_div == 1) {
+        s_vp_x0 = s_uvp_x0, s_vp_y0 = s_uvp_y0, s_vp_x1 = s_uvp_x1, s_vp_y1 = s_uvp_y1;
+        return;
+    }
+    // Target pixel i samples full-screen pixel 2i: inside when
+    // x0 <= 2i <= x1. Never empty: a one-pixel rect keeps one pixel.
+    s_vp_x0 = (s_uvp_x0 + 1) / 2, s_vp_y0 = (s_uvp_y0 + 1) / 2;
+    s_vp_x1 = s_uvp_x1 / 2, s_vp_y1 = s_uvp_y1 / 2;
+    if (s_vp_x1 < s_vp_x0) s_vp_x1 = s_vp_x0;
+    if (s_vp_y1 < s_vp_y0) s_vp_y1 = s_vp_y0;
+}
 
 void scene_set_viewport(se_viewport_t const* vp) {
     if (vp == NULL) {
-        s_vp_x0 = 0;
-        s_vp_y0 = 0;
-        s_vp_x1 = DISPLAY_LOG_W - 1;
-        s_vp_y1 = DISPLAY_LOG_H - 1;
+        s_uvp_x0 = 0;
+        s_uvp_y0 = 0;
+        s_uvp_x1 = DISPLAY_LOG_W - 1;
+        s_uvp_y1 = DISPLAY_LOG_H - 1;
+        viewport_apply();
         return;
     }
     int x0 = vp->x, y0 = vp->y;
@@ -303,14 +364,16 @@ void scene_set_viewport(se_viewport_t const* vp) {
     // symptom rather than a silent corruption.
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
-    s_vp_x0 = x0;
-    s_vp_y0 = y0;
-    s_vp_x1 = x1;
-    s_vp_y1 = y1;
+    s_uvp_x0 = x0;
+    s_uvp_y0 = y0;
+    s_uvp_x1 = x1;
+    s_uvp_y1 = y1;
+    viewport_apply();
 }
 
 se_viewport_t scene_viewport(void) {
-    return (se_viewport_t){.x = s_vp_x0, .y = s_vp_y0, .w = s_vp_x1 - s_vp_x0 + 1, .h = s_vp_y1 - s_vp_y0 + 1};
+    return (se_viewport_t){
+        .x = s_uvp_x0, .y = s_uvp_y0, .w = s_uvp_x1 - s_uvp_x0 + 1, .h = s_uvp_y1 - s_uvp_y0 + 1};
 }
 
 // --- Triangle rasterizer ------------------------------------------------------
@@ -330,7 +393,7 @@ static inline void scene_vrun(int lx, int y_top, int y_bot,
 
     uint16_t const frame = s_frame;
     uint32_t const fhi   = (uint32_t)frame << 16;   // stamp pre-shifted for the store
-    int const idx = direct_565_logical_index(lx, y_top);
+    int const idx = scene_index(lx, y_top);
     uint16_t* fp  = s_fb + idx;
     uint32_t* dp  = s_ds + idx;
     float     d   = As * (float)lx + Bs * (float)y_top + Cs;
@@ -448,7 +511,7 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
 
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
-    int const       idx   = direct_565_logical_index(lx, y_top);
+    int const       idx   = scene_index(lx, y_top);
     uint16_t*       fp    = s_fb + idx;
     uint32_t*       dp    = s_ds + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
@@ -490,6 +553,60 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
     }
 }
 
+// The same for a cut-out texture (se_texture.h): the texel is fetched
+// before anything is written, and a hole (SE_TEXEL_CUTOUT) writes
+// neither colour nor depth, so whatever lies behind shows through. A
+// sibling rather than a flag in the loop above, so opaque textures run
+// exactly the code they always did.
+static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (y_top > y_bot) return;
+
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = scene_index(lx, y_top);
+    uint16_t*       fp    = s_fb + idx;
+    uint32_t*       dp    = s_ds + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  sh    = st->shade;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint32_t const cell   = *dp;
+        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        if ((uint16_t)di > stored) {
+            // di >= 1 here, so d >= 1: the divide is safe.
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            if (t != SE_TEXEL_CUTOUT) {
+                *dp        = fhi | (uint16_t)di;
+                uint32_t x = (t | (t << 16)) & 0x07E0F81Fu;
+                x          = ((x * sh) >> 5) & 0x07E0F81Fu;
+                uint16_t px = (uint16_t)(x | (x >> 16));
+                if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+                *fp = px;
+            }
+        }
+        fp--;
+        dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
 static void scene_raster_ttri(se_ttri_t const* t) {
     se_tvtx_t const a = t->v[0], b = t->v[1], c = t->v[2];
     float const ex1 = b.sx - a.sx, ey1 = b.sy - a.sy;
@@ -518,6 +635,7 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     st.hmask  = (uint32_t)t->tex->h - 1u;
     st.wlog2  = t->tex->w_log2;
     st.shade  = t->shade;
+    bool const cutout = t->tex->cutout;
 
     // Column scan, as in scene_raster_tri.
     float x0 = a.sx, y0 = a.sy, x1 = b.sx, y1 = b.sy, x2 = c.sx, y2 = c.sy;
@@ -547,7 +665,8 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb = y0 + dydx_01 * dx;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        if (cutout) scene_vrun_tex_cutout(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        else        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
     }
     for (int x = ix_split; x < ix_endex; x++) {
         float const dx02 = (float)x - x0;
@@ -556,7 +675,8 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb   = y1 + dydx_12 * dx12;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        if (cutout) scene_vrun_tex_cutout(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        else        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
     }
 }
 
@@ -592,10 +712,10 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     float const dd    = (steps > 0) ? (edb - eda) / (float)steps : 0.0f;
 
     uint16_t const frame = s_frame;
-    int     const ptr_dx = (sx > 0) ? DISPLAY_RAW_STRIDE : -DISPLAY_RAW_STRIDE;
+    int     const ptr_dx = (sx > 0) ? s_raw_stride : -s_raw_stride;
     int     const ptr_dy = (sy > 0) ? -1 : 1;
 
-    int const idx = direct_565_logical_index(x0, y0);
+    int const idx = scene_index(x0, y0);
     uint16_t* fp  = s_fb + idx;
     uint32_t* dp  = s_ds + idx;
     int       lx  = x0;
@@ -855,7 +975,7 @@ void se_scene_raster_points(void) {
         se_pt_t const* pt = &s_pts[i];
         int const      x  = (int)lroundf(pt->v.sx), y = (int)lroundf(pt->v.sy);
         if (x < s_vp_x0 || x > s_vp_x1 || y < s_vp_y0 || y > s_vp_y1) continue;
-        int const      idx    = direct_565_logical_index(x, y);
+        int const      idx    = scene_index(x, y);
         uint32_t const cell   = s_ds[idx];
         uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
         int            di     = (int)(pt->v.w * SCENE_DEPTH_SCALE);
@@ -1236,7 +1356,7 @@ static void rc_cast_tile(int tx, int ty, rc_setup_t const* set, int n) {
     if (x0 >= x1 || y0 >= y1) return;
 
     uint16_t const frame = s_frame;
-    int      const base  = direct_565_logical_index(x0, y0);
+    int      const base  = scene_index(x0, y0);
 
     for (int x = x0; x < x1; x++) {
         float const fx  = (float)x;
@@ -1359,6 +1479,9 @@ char const* se_renderer_name(se_render_mode_t mode) {
 // Resolve a mode to a usable renderer, falling back to the default rather
 // than dereferencing a bogus handle.
 static se_renderer_t const* renderer_for(se_render_mode_t mode) {
+    // The raycaster's tiles are sized for the full screen: at quarter
+    // resolution the z-buffer renders instead.
+    if (s_div != 1 && mode == SE_RENDER_RAYCAST) mode = SE_RENDER_ZBUFFER;
     if ((int)mode < 0 || (int)mode >= s_renderer_n || !s_renderers[mode].rasterize) {
         return &s_renderers[SE_RENDER_DEFAULT];
     }
@@ -1379,6 +1502,7 @@ se_geometry_t se_scene_geometry(void) {
         .ttri_n      = s_ttri_n,
         .pts         = s_pts,
         .pt_n        = s_pt_n,
+        .scale       = s_div,
     };
 }
 

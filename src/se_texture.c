@@ -2,7 +2,7 @@
 //  SynthEngine3D  --  textures (se_texture.h)
 // ---------------------------------------------------------------------
 //  PNG -> RGB565 via libspng, which graceloader already carries (through
-//  pax-codecs). The contract -- power-of-two sizes, alpha discarded,
+//  pax-codecs). The contract -- power-of-two sizes, one-bit alpha (holes),
 //  internal SRAM on request with a PSRAM fallback -- is in the header.
 // =====================================================================
 
@@ -125,19 +125,30 @@ se_texture_t* se_texture_load(char const* path, uint32_t flags) {
 
     // RGBA8 -> RGB565 by truncation, the same rounding direct_565_pack
     // uses, so a texel and a flat triangle of the same ARGB come out as
-    // the same pixel. The mean is taken on the 8-bit values, before that
-    // truncation throws precision away.
+    // the same pixel. Alpha below half makes a hole (SE_TEXEL_CUTOUT); an
+    // opaque texel that truncates to that value moves one blue step down
+    // so it stays drawn. The mean is taken over the opaque texels, on
+    // the 8-bit values, before the truncation throws precision away.
     uint64_t sr = 0, sg = 0, sb = 0;
+    size_t   opaque = 0;
     for (size_t i = 0; i < n; i++) {
         uint8_t const r = rgba[4 * i + 0];
         uint8_t const g = rgba[4 * i + 1];
         uint8_t const b = rgba[4 * i + 2];
+        if (rgba[4 * i + 3] < 128) {
+            texels[i] = SE_TEXEL_CUTOUT;
+            continue;
+        }
         sr += r;
         sg += g;
         sb += b;
-        texels[i] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        opaque++;
+        uint16_t t = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        if (t == SE_TEXEL_CUTOUT) t--;
+        texels[i] = t;
     }
     heap_caps_free(rgba);
+    size_t const mn = opaque ? opaque : 1;
 
     *tex = (se_texture_t){
         .texels    = texels,
@@ -145,10 +156,11 @@ se_texture_t* se_texture_load(char const* path, uint32_t flags) {
         .h         = (int)h,
         .w_log2    = log2_pow2(w),
         .internal  = in_sram,
-        .mean_argb = 0xFF000000u | ((uint32_t)(sr / n) << 16) | ((uint32_t)(sg / n) << 8) | (uint32_t)(sb / n),
+        .mean_argb = 0xFF000000u | ((uint32_t)(sr / mn) << 16) | ((uint32_t)(sg / mn) << 8) | (uint32_t)(sb / mn),
+        .cutout    = opaque < n,
     };
-    ESP_LOGI(TAG, "%s: %ux%u, %u bytes in %s", path, (unsigned)w, (unsigned)h, (unsigned)bytes,
-             in_sram ? "internal SRAM" : "PSRAM");
+    ESP_LOGI(TAG, "%s: %ux%u, %u bytes in %s%s", path, (unsigned)w, (unsigned)h, (unsigned)bytes,
+             in_sram ? "internal SRAM" : "PSRAM", opaque < n ? ", cut-out" : "");
     return tex;
 }
 

@@ -77,17 +77,46 @@ release.
   allocated in PSRAM on the first `scene_point()`, so games that never call it
   pay nothing.
 
+### Added — `se_scene.h` (quarter-resolution rendering)
+
+- **`scene_set_render_scale(2)`** renders at half the width and height: a
+  quarter of the pixels, so about a quarter of the rasterizing for a
+  fill-bound scene. The camera, the `RENDER_*` projection, the viewport (still
+  in full-screen pixels), culling, clipping and lighting are unchanged; only
+  the projected positions are halved, so target pixel (i, j) is what full
+  resolution draws at (2i, 2j). `scene_begin()` then takes a half-size buffer
+  (e.g. an `se_ppa_layer_t`), which the game scales up. Latched per frame, so
+  scenes can switch freely. Lines and points stay one target pixel wide. The
+  raycast renderer falls back to the z-buffer at quarter resolution.
+  `scene_render_scale()`; `se_geometry_t.scale` (appended). At scale 1 the
+  output is bit for bit unchanged.
+
+### Added — `se_ppa.h`
+
+- **`se_ppa_blit_scaled(fb, id, layer, factor)`** — the whole layer scaled up
+  by an integer factor (the quarter-resolution upscale). The PPA's scaler
+  interpolates, so the result is soft rather than blocky.
+- **`se_ppa_layer_sync(layer)`** — write back and invalidate a layer the CPU
+  draws into every frame and the PPA reads or fills.
+- **`se_ppa_buf_invalidate(buf)`** — drop a buffer the PPA wrote from the CPU
+  cache before the CPU reads it.
+
 ### Added — `se_texture.h` and textured triangles
 
 - **`se_texture_load(path, flags)` / `se_texture_unload(tex)`** — PNG via
   libspng into RGB565. Power-of-two edges up to `SE_TEXTURE_MAX_DIM`; alpha
-  discarded. `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, with a
+  reduced to one bit (see cut-out transparency below). `SE_TEXTURE_INTERNAL` puts the texels in internal SRAM, with a
   logged PSRAM fallback reported in `tex->internal`.
 - **`scene_textured_tri(v[3], tex, flags)`** — perspective-correct,
   nearest-texel, repeating, lit like `scene_tri`. Drawn from a list of its own
   (`SE_SCENE_TEXTURED_TRI_CAP`, allocated on the first texture load) after the
   flat triangles and before the edges, depth-tested against both. Both built-in
   renderers draw it. Custom renderers can call `se_scene_raster_textured()`.
+- **Cut-out transparency:** a texel whose PNG alpha is below 128 is a hole
+  (`SE_TEXEL_CUTOUT`) and draws neither colour nor depth, so what is behind
+  shows through, with no sorting needed. `se_texture_t.cutout` (appended) tells
+  whether a texture has any; `mean_argb` averages the opaque texels. Opaque
+  textures render bit for bit as before. No blending.
 - **`scene_textured_stats()`** — count and wallclock of the textured pass.
   `scene_raster_stats()` keeps meaning flat triangles only.
 
