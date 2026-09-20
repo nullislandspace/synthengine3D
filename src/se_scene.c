@@ -179,6 +179,20 @@ static int64_t      s_stat_tri_us  = 0;
 static int64_t      s_stat_line_us = 0;
 static int          s_stat_ttri_n  = 0;
 static int64_t      s_stat_ttri_us = 0;
+
+// Pixels COVERED by each pass -- span lengths, summed once per span, not
+// once per pixel. A fill-bound renderer's only honest denominator: a
+// frame time means nothing without the pixel count that produced it, and
+// ns-per-pixel is what says whether the inner loop is bound on
+// arithmetic or on the PSRAM the framebuffer and depth plane live in.
+static int64_t      s_stat_tri_px  = 0;
+static int64_t      s_stat_ttri_px = 0;
+// ... and how many SPANS those pixels came in. Pixels alone cannot tell
+// a fill loop from its setup: a pass of 200000 pixels in 2000 spans and
+// one in 20000 spans cost very different amounts for the same picture,
+// and only the second is worth vectorising.
+static int64_t      s_stat_tri_sp  = 0;
+static int64_t      s_stat_ttri_sp = 0;
 static int          s_stat_pt_n    = 0;
 static int64_t      s_stat_pt_us   = 0;
 
@@ -376,6 +390,29 @@ se_viewport_t scene_viewport(void) {
         .x = s_uvp_x0, .y = s_uvp_y0, .w = s_uvp_x1 - s_uvp_x0 + 1, .h = s_uvp_y1 - s_uvp_y0 + 1};
 }
 
+// --- Rounding, without libm ----------------------------------------------------
+//
+// ceilf() and floorf() are LIBRARY CALLS, even at -O2: they have to set
+// errno, so the compiler cannot fold them into the single RISC-V
+// convert instruction the value actually needs. The column scans below
+// call them twice per span, and a voxel scene draws tens of thousands
+// of spans a frame -- measured at 28000, so 57000 library calls to
+// round a number that is already in a float register.
+//
+// These do it inline. (int) truncates towards zero, which is floor for
+// a positive value and ceil for a negative one; the compare corrects
+// the other case. Same results as the libm calls for every finite value
+// in range, which is all a screen coordinate ever is.
+static inline int ceil_i(float v) {
+    int const i = (int)v;
+    return (v > (float)i) ? i + 1 : i;
+}
+
+static inline int floor_i(float v) {
+    int const i = (int)v;
+    return (v < (float)i) ? i - 1 : i;
+}
+
 // --- Triangle rasterizer ------------------------------------------------------
 
 // Fill one vertical run (logical x fixed) with a per-pixel depth
@@ -398,6 +435,8 @@ static inline void scene_vrun(int lx, int y_top, int y_bot,
     uint32_t* dp  = s_ds + idx;
     float     d   = As * (float)lx + Bs * (float)y_top + Cs;
     int       cnt = y_bot - y_top + 1;
+    s_stat_tri_px += cnt;
+    s_stat_tri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;                      // sub-pixel edge overshoot guard
@@ -448,9 +487,9 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     float const dydx_01 = (x1 > x0) ? (y1 - y0) / (x1 - x0) : 0.0f;
     float const dydx_12 = (x2 > x1) ? (y2 - y1) / (x2 - x1) : 0.0f;
 
-    int ix_start =     (int)ceilf(x0);
-    int ix_split =     (int)ceilf(x1);
-    int ix_endex = 1 + (int)floorf(x2);
+    int ix_start =     ceil_i(x0);
+    int ix_split =     ceil_i(x1);
+    int ix_endex = 1 + floor_i(x2);
     if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
     if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
     if (ix_split < ix_start)      ix_split = ix_start;
@@ -462,7 +501,7 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
         float const yb = y0 + dydx_01 * dx;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), As, Bs, Cs, packed);
+        scene_vrun(x, ceil_i(yt), floor_i(yz), As, Bs, Cs, packed);
     }
     for (int x = ix_split; x < ix_endex; x++) {
         float const dx02 = (float)x - x0;
@@ -471,7 +510,7 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
         float const yb   = y1 + dydx_12 * dx12;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        scene_vrun(x, (int)ceilf(yt), (int)floorf(yz), As, Bs, Cs, packed);
+        scene_vrun(x, ceil_i(yt), floor_i(yz), As, Bs, Cs, packed);
     }
 }
 
@@ -524,6 +563,8 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
     uint32_t const  sh    = st->shade;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
+    s_stat_ttri_px += cnt;
+    s_stat_ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -579,6 +620,8 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
     uint32_t const  sh    = st->shade;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
+    s_stat_ttri_px += cnt;
+    s_stat_ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -651,9 +694,9 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     float const dydx_01 = (x1 > x0) ? (y1 - y0) / (x1 - x0) : 0.0f;
     float const dydx_12 = (x2 > x1) ? (y2 - y1) / (x2 - x1) : 0.0f;
 
-    int ix_start =     (int)ceilf(x0);
-    int ix_split =     (int)ceilf(x1);
-    int ix_endex = 1 + (int)floorf(x2);
+    int ix_start =     ceil_i(x0);
+    int ix_split =     ceil_i(x1);
+    int ix_endex = 1 + floor_i(x2);
     if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
     if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
     if (ix_split < ix_start)      ix_split = ix_start;
@@ -665,8 +708,8 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb = y0 + dydx_01 * dx;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        if (cutout) scene_vrun_tex_cutout(x, (int)ceilf(yt), (int)floorf(yz), &st);
-        else        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
+        else        scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
     }
     for (int x = ix_split; x < ix_endex; x++) {
         float const dx02 = (float)x - x0;
@@ -675,8 +718,8 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb   = y1 + dydx_12 * dx12;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        if (cutout) scene_vrun_tex_cutout(x, (int)ceilf(yt), (int)floorf(yz), &st);
-        else        scene_vrun_tex(x, (int)ceilf(yt), (int)floorf(yz), &st);
+        if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
+        else        scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
     }
 }
 
@@ -1261,8 +1304,8 @@ static inline bool rc_tri_tiles(scene_tri_t const* t,
         if (x < minx) minx = x; else if (x > maxx) maxx = x;
         if (y < miny) miny = y; else if (y > maxy) maxy = y;
     }
-    int ix0 = (int)floorf(minx), ix1 = (int)ceilf(maxx);
-    int iy0 = (int)floorf(miny), iy1 = (int)ceilf(maxy);
+    int ix0 = floor_i(minx), ix1 = ceil_i(maxx);
+    int iy0 = floor_i(miny), iy1 = ceil_i(maxy);
     if (ix0 < s_vp_x0) ix0 = s_vp_x0;
     if (iy0 < s_vp_y0) iy0 = s_vp_y0;
     if (ix1 > s_vp_x1) ix1 = s_vp_x1;
@@ -1526,6 +1569,10 @@ void scene_rasterize(se_render_mode_t mode) {
     s_stat_line_n = s_line_n;
     s_stat_ttri_n  = s_ttri_n;
     s_stat_ttri_us = 0;   // stays 0 if a custom renderer skips the textured pass
+    s_stat_tri_px  = 0;
+    s_stat_ttri_px = 0;
+    s_stat_tri_sp  = 0;
+    s_stat_ttri_sp = 0;
     s_stat_pt_n    = s_pt_n;
     s_stat_pt_us   = 0;   // likewise for the point pass
 
@@ -1548,6 +1595,13 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
 void scene_textured_stats(int* ttri_n, int64_t* ttri_us) {
     if (ttri_n)  *ttri_n  = s_stat_ttri_n;
     if (ttri_us) *ttri_us = s_stat_ttri_us;
+}
+
+void scene_fill_stats(int64_t* tri_px, int64_t* ttri_px, int64_t* tri_spans, int64_t* ttri_spans) {
+    if (tri_px)     *tri_px     = s_stat_tri_px;
+    if (ttri_px)    *ttri_px    = s_stat_ttri_px;
+    if (tri_spans)  *tri_spans  = s_stat_tri_sp;
+    if (ttri_spans) *ttri_spans = s_stat_ttri_sp;
 }
 
 void scene_point_stats(int* pt_n, int64_t* pt_us) {

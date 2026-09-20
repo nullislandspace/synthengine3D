@@ -63,7 +63,7 @@ else()
 
     target_compile_options(synthengine3d PRIVATE
         -Wall -Wextra -Wno-unused-parameter
-        -Os -fPIC
+        -O2 -fPIC
         -ffunction-sections -fdata-sections -fno-common
         -D__thread=
         -DESP_PLATFORM

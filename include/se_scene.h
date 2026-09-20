@@ -236,6 +236,16 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
 // be NULL.
 void scene_textured_stats(int* ttri_n, int64_t* ttri_us);
 
+// Pixels COVERED by the last rasterize -- the span lengths the two fill
+// loops walked, flat and textured. Divide the matching *_us by these and
+// you have nanoseconds per pixel, which is the number that says whether
+// a fill loop is bound on its arithmetic or on the PSRAM its framebuffer
+// and depth plane live in. Counts are per span, so they cost nothing.
+// ... and the number of spans they arrived in: pixels divided by spans
+// is the average run length, which is what decides whether the inner
+// loop or its per-span setup is the cost.
+void scene_fill_stats(int64_t* tri_px, int64_t* ttri_px, int64_t* tri_spans, int64_t* ttri_spans);
+
 // The same for points: how many were drawn in the most recent
 // scene_rasterize() and how long the point pass took. Either pointer may
 // be NULL.

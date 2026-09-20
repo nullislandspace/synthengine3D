@@ -13,9 +13,49 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
-## [2.1] — 2026-09-20
+## [2.1] — 2026-09-20 (unreleased, still being worked on)
 
 Additive only: a 2.0 game builds unchanged.
+
+### Changed — the rasterizer is faster, and says why (2026-09-21)
+
+Measured in CraftMiner on the badge, over a 20-second flight across streamed
+voxel terrain. Nothing about the public API changes except one addition below;
+a game gets this by rebuilding.
+
+- **Built with `-O2`, not `-Os`.** The engine runs from PSRAM, where code size
+  is the one resource that is not scarce. At `-Os` the compiler would not inline
+  `scene_index()` or the span functions despite their `static inline`, so every
+  span paid a function call. **Flat fill 22.0 → 19.4 ms a frame, textured
+  37.7 → 34.7 ms**; `.text` grew 7 KiB.
+
+- **`ceilf`/`floorf` are gone from the column scans.** They are library calls
+  even at `-O2` — they have to set `errno`, so the compiler cannot fold them
+  into the one RISC-V convert instruction the value needs. The scans called them
+  twice per span, and a voxel frame draws **28000 spans**: 57000 library calls a
+  frame to round a number already sitting in a float register. `ceil_i()` /
+  `floor_i()` do it inline, with identical results for every finite in-range
+  value. **Flat fill 19.4 → 13.4 ms, textured 34.7 → 31.7 ms.**
+
+Together: **rasterize 49.7 → 43.6 ms**, and the frame rate of the case that
+motivated it went 13.4 → 15.3 fps.
+
+The measurement that found this is worth more than the fix. A voxel scene's
+spans average **6 pixels** (flat) and **12** (textured), so the *per-span* cost
+— clip, plane setup, call — dominated the per-pixel one. That is also why
+vectorising the inner loops (the ESP32-P4's PIE SIMD, which this toolchain
+already enables) was **not** the answer: there is barely a vector's worth of
+pixels in a span to begin with.
+
+### Added
+
+- **`scene_fill_stats(tri_px, ttri_px, tri_spans, ttri_spans)`** — pixels
+  covered and spans walked by the last rasterize, flat and textured. Counted per
+  span, so they cost nothing. `*_us / *_px` is nanoseconds per pixel and
+  `*_px / *_spans` the average run length: between them they say whether a fill
+  loop is bound on its arithmetic, on memory, or on its own setup — which is not
+  guessable from the outside, and was guessed wrong here twice before being
+  measured.
 
 ### Added — host harness (`host/`)
 
