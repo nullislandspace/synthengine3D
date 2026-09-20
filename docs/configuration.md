@@ -57,6 +57,14 @@ leaves hardcode rotation + stride into their inner loops off these.
 - `SE_TEXTURE_MAX_DIM` — the largest texture edge (default 512; must be a
   power of two). Also bounds the decode scratch: 4 bytes per texel, briefly, in
   PSRAM.
+- `SE_SCENE_TRI_CAP` — flat triangles per frame (default 4096, ~40 bytes each,
+  so ~160 KB). Allocated once at the first `scene_begin()`, internal SRAM first,
+  PSRAM if that is too tight. Overflow drops the extra triangles silently, so a
+  game that draws a lot of geometry raises it — and one that draws little can
+  lower it and get the memory back. Public since 2.1 (it was private before), so
+  a host-side checker can compare a frame against the real cap.
+- `SE_SCENE_LINE_CAP` — wireframe edges per frame (default 4096, ~24 bytes each,
+  so ~96 KB). Same allocation and overflow behaviour.
 - `SE_SCENE_TEXTURED_TRI_CAP` — textured triangles per frame (default 1024,
   ~68 bytes each). Allocated when the first texture loads, internal SRAM first,
   PSRAM if that is too tight. Raise it for texture-heavy scenes (the showreel's

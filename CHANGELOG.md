@@ -13,6 +13,34 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
+## [2.1] — 2026-09-20
+
+Additive only: a 2.0 game builds unchanged.
+
+### Added — host harness (`host/`)
+
+- **Run a game's scene code on a PC.** `host/se_host_stub.c` implements the
+  engine API a game's scene and asset code calls — the camera (the badge's own
+  basis and projection), `se_light`, `se_texture_load` (always succeeds, blank
+  64×64) and the four primitive calls — and forwards every primitive to five
+  `se_host_*` hooks the game implements. `host/shims/` holds stand-ins for the
+  ESP-IDF and PAX headers the public headers mention, plus a host
+  `synthengine3d.h` that includes the real `se_*.h`, so the types stay the
+  engine's. Nothing is rasterized: this checks what a frame *contains* (near-plane
+  crossings, list overflows, object clearances, framing), in a second, with no
+  device. `host/se_host_selftest.c` is the worked example and the regression
+  test (`make -C host check`); [`docs/testing.md`](docs/testing.md) is the guide.
+- It lived in the showreel before this, where it had copied the projection and
+  the list caps out of the engine by hand and could drift from them silently.
+
+### Added — `se_config.h` (list caps)
+
+- **`SE_SCENE_TRI_CAP`** and **`SE_SCENE_LINE_CAP`** (both default 4096, the
+  values they always had) are now public, overridable `#ifndef` macros like
+  `SE_SCENE_TEXTURED_TRI_CAP` and `SE_SCENE_POINT_CAP` beside them. They were
+  private to `se_scene.c`, so a game could not size its frame lists, and a
+  host-side checker could only copy the numbers and hope they stayed true.
+
 ## [2.0] — 2026-09-19
 
 ### Migrating from 1.x

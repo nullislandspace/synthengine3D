@@ -134,12 +134,12 @@ void render_project(float x_w, float y_w, float z_w, float* out_sx, float* out_s
 
 #define SCENE_PIXELS  (DISPLAY_LOG_W * DISPLAY_RAW_STRIDE)
 
-// Deferred geometry caps. ~80 obstacles * (a few faces * 2 tris) + the
-// ship + pickups stays well under the triangle cap; ~80 * ~14 edges fits
-// the edge cap. Overflow silently drops extra geometry (see scene_tri /
-// scene_line). At ~40 B/tri the triangle buffer is ~160 KB of PSRAM.
-#define SCENE_TRI_CAP   4096
-#define SCENE_LINE_CAP  4096
+// Deferred geometry caps: public and overridable since 2.1, so a game
+// can size them to its own frame and a host-side checker can read them
+// (se_config.h). Overflow silently drops extra geometry (see scene_tri /
+// scene_line). At ~40 B/tri the default triangle buffer is ~160 KB.
+#define SCENE_TRI_CAP   SE_SCENE_TRI_CAP
+#define SCENE_LINE_CAP  SE_SCENE_LINE_CAP
 
 // The deferred-geometry types are part of the public surface now, so a
 // game can write its own renderer against them (se_scene.h). These aliases

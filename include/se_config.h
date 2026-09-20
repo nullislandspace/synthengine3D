@@ -264,6 +264,22 @@
 #define SE_TEXTURE_MAX_DIM  512
 #endif
 
+// Flat triangles and wireframe edges one frame can hold. Both lists are
+// allocated once, at the first scene_begin(): ~40 bytes per triangle and
+// ~24 per edge, internal SRAM first with PSRAM as the fallback, so the
+// defaults are ~160 KB and ~96 KB. Overflow drops the extra primitives
+// silently (see scene_tri / scene_line) -- a game that draws a lot of
+// geometry raises these, and one that draws little can lower them to
+// free the memory. A host-side checker can read them to spot a frame
+// that would overflow on the badge.
+#ifndef SE_SCENE_TRI_CAP
+#define SE_SCENE_TRI_CAP  4096
+#endif
+
+#ifndef SE_SCENE_LINE_CAP
+#define SE_SCENE_LINE_CAP  4096
+#endif
+
 // Textured triangles one frame can hold. The list is separate from the
 // flat-triangle list and costs nothing until the first texture is loaded
 // (it is allocated then, internal SRAM first, PSRAM as the fallback). At

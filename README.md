@@ -31,6 +31,7 @@ it requires a MAJOR bump.
 | **Vector text** | `se_text.h` | Hershey single-stroke vector text, rendered straight to the framebuffer. |
 | **Framebuffer leaves** | `se_direct565.h` | Hot `static inline` RGB565 pixel / line / triangle / dim-rect primitives (rotation + stride compile-folded). |
 | **Configuration** | `se_config.h` | Every compile-time default (display geometry, projection, audio gains, UI theme, slot count, …) as an overridable `#ifndef` macro. |
+| **Host harness** | `host/se_host.h` | Compile a game's scene and asset code with a plain host compiler and get every primitive it submits, with the badge's camera and projection, so a test can check what a frame *contains* — near-plane crossings, list overflows, object clearances, framing — in a second, with no device. See [`docs/testing.md`](docs/testing.md). |
 
 Include everything via the umbrella `#include "synthengine3d.h"`, or pull
 individual `se_*.h` headers.
@@ -120,3 +121,4 @@ The same `CMakeLists.txt` builds two ways (see [`docs/integration.md`](docs/inte
 - [`docs/objects.md`](docs/objects.md) — the geometry-submission contract for 3D objects.
 - [`docs/configuration.md`](docs/configuration.md) — every `se_config.h` knob.
 - [`docs/integration.md`](docs/integration.md) — both build modes, dependencies, porting the display.
+- [`docs/testing.md`](docs/testing.md) — the host harness: run a game's scene code on a PC and check what each frame contains, with no device attached.
