@@ -193,6 +193,16 @@ static int64_t      s_stat_ttri_px = 0;
 // and only the second is worth vectorising.
 static int64_t      s_stat_tri_sp  = 0;
 static int64_t      s_stat_ttri_sp = 0;
+// Primitives the lists had no room for.
+//
+// Overflow DROPS, which is the only sane thing a fixed list can do --
+// but it did it silently, and a silent drop is a hole in the world
+// that looks like a bug in the game. It has cost this project two
+// debugging sessions: once when a view distance quietly lost a third
+// of its geometry, and once when half a title screen went missing and
+// every other explanation was checked first.
+static int          s_stat_tri_drop  = 0;
+static int          s_stat_ttri_drop = 0;
 static int          s_stat_pt_n    = 0;
 static int64_t      s_stat_pt_us   = 0;
 
@@ -277,6 +287,8 @@ void scene_begin(pax_buf_t* fb) {
     s_line_n = 0;
     s_ttri_n = 0;
     s_pt_n   = 0;
+    s_stat_tri_drop  = 0;
+    s_stat_ttri_drop = 0;
     // Advance the frame tag; skip 0 so a zero-initialised stamp cell
     // is never mistaken for "written this frame".
     s_frame++;
@@ -833,7 +845,10 @@ static inline int clip_behind_count(clip_vtx_t const c[3]) {
 // Append one projected flat triangle (all vertices at or in front of the
 // near plane).
 static void emit_tri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const* c, uint16_t packed) {
-    if (s_tri_n >= SCENE_TRI_CAP) return;   // overflow: drop extra tris
+    if (s_tri_n >= SCENE_TRI_CAP) {
+        s_stat_tri_drop++;
+        return;  // overflow: drop extra tris
+    }
     scene_tri_t* t = &s_tris[s_tri_n++];
     scene_project_cam(a->x, a->y, a->z, &t->v[0]);
     scene_project_cam(b->x, b->y, b->z, &t->v[1]);
@@ -911,7 +926,10 @@ void scene_line(float x0, float y0, float z0,
 // piece of a clipped triangle maps the texture exactly as the whole did.
 static void emit_ttri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const* c,
                       se_texture_t const* tex, float ush, float vsh, uint8_t shade) {
-    if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;   // overflow: drop, as scene_tri does
+    if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) {
+        s_stat_ttri_drop++;
+        return;  // overflow: drop, as scene_tri does
+    }
     se_ttri_t* t = &s_ttris[s_ttri_n++];
     clip_vtx_t const* const q[3] = {a, b, c};
     float const tw = (float)tex->w, th = (float)tex->h;
@@ -1573,6 +1591,8 @@ void scene_rasterize(se_render_mode_t mode) {
     s_stat_ttri_px = 0;
     s_stat_tri_sp  = 0;
     s_stat_ttri_sp = 0;
+    s_stat_tri_drop  = 0;
+    s_stat_ttri_drop = 0;
     s_stat_pt_n    = s_pt_n;
     s_stat_pt_us   = 0;   // likewise for the point pass
 
@@ -1595,6 +1615,11 @@ void scene_raster_stats(int* tri_n, int* line_n, int64_t* tri_us, int64_t* line_
 void scene_textured_stats(int* ttri_n, int64_t* ttri_us) {
     if (ttri_n)  *ttri_n  = s_stat_ttri_n;
     if (ttri_us) *ttri_us = s_stat_ttri_us;
+}
+
+void scene_drop_stats(int* tris, int* ttris) {
+    if (tris) *tris = s_stat_tri_drop;
+    if (ttris) *ttris = s_stat_ttri_drop;
 }
 
 void scene_fill_stats(int64_t* tri_px, int64_t* ttri_px, int64_t* tri_spans, int64_t* ttri_spans) {

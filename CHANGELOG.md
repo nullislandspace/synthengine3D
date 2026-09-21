@@ -47,6 +47,20 @@ vectorising the inner loops (the ESP32-P4's PIE SIMD, which this toolchain
 already enables) was **not** the answer: there is barely a vector's worth of
 pixels in a span to begin with.
 
+### Added — `scene_drop_stats()` (2026-09-21)
+
+- **A full geometry list dropped silently, and now it counts.** `scene_tri()`
+  and `scene_textured_tri()` return without drawing once the frame's list is
+  full — the only sane thing a fixed list can do — but they did it without a
+  word, and the drop is in *submission order*, so what disappears is whatever
+  the game happened to submit last: a corner of the world, a chunk, half a
+  title screen. That reads as a bug in the game, and it cost CraftMiner two
+  debugging sessions before it was made visible.
+
+  `scene_drop_stats(int* tris, int* ttris)` reports what this frame's lists had
+  no room for. **Anything non-zero is a hole in the picture.** Counted from
+  `scene_begin()`; read it after submitting.
+
 ### Added
 
 - **`scene_fill_stats(tri_px, ttri_px, tri_spans, ttri_spans)`** — pixels

@@ -246,6 +246,16 @@ void scene_textured_stats(int* ttri_n, int64_t* ttri_us);
 // loop or its per-span setup is the cost.
 void scene_fill_stats(int64_t* tri_px, int64_t* ttri_px, int64_t* tri_spans, int64_t* ttri_spans);
 
+// Primitives this frame's lists had no room for: flat triangles past
+// SE_SCENE_TRI_CAP and textured ones past SE_SCENE_TEXTURED_TRI_CAP.
+//
+// A FULL LIST DROPS, and the drop is in submission order, so what
+// disappears is whatever the game happened to submit last -- a corner
+// of the world, a chunk, half a title. **Anything non-zero here is a
+// hole in the picture.** Counted since scene_begin(); read it after
+// submitting and before the next frame.
+void scene_drop_stats(int* tris, int* ttris);
+
 // The same for points: how many were drawn in the most recent
 // scene_rasterize() and how long the point pass took. Either pointer may
 // be NULL.
