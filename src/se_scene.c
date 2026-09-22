@@ -869,7 +869,10 @@ void scene_tri(float x0, float y0, float z0,
     // frustum cull (scene_cull_pass, opt-in via scene_set_options).
     int const behind = clip_behind_count(c);
     if (behind == 3) return;
-    if (behind == 0 && s_tri_n >= SCENE_TRI_CAP) return;   // overflow: skip the shading too
+    if (behind == 0 && s_tri_n >= SCENE_TRI_CAP) {   // overflow: skip the shading too
+        s_stat_tri_drop++;  // counted here too -- the common case, and the one that went unseen
+        return;
+    }
 
     // Lighting (se_light.h): shade the face once, from the WORLD-space
     // vertices -- the light lives in world space -- whatever clipping does
@@ -879,6 +882,14 @@ void scene_tri(float x0, float y0, float z0,
     if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
                                   s_camera.x, s_camera.y, s_camera.z);
+    }
+    // The game's own light level (SE_TRI_LIGHT), folded into the colour.
+    if (flags & SE_TRI_LIGHT_MASK) {
+        uint32_t const lv = se_tri_light_level(flags);
+        uint32_t const r  = ((argb >> 16) & 0xFFu) * lv / SE_TRI_LIGHT_MAX;
+        uint32_t const g  = ((argb >> 8) & 0xFFu) * lv / SE_TRI_LIGHT_MAX;
+        uint32_t const b  = (argb & 0xFFu) * lv / SE_TRI_LIGHT_MAX;
+        argb              = (argb & 0xFF000000u) | (r << 16) | (g << 8) | b;
     }
     uint16_t const packed = direct_565_pack(argb, s_rev);
 
@@ -958,7 +969,10 @@ void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uin
     // Same near handling as scene_tri.
     int const behind = clip_behind_count(c);
     if (behind == 3) return;
-    if (behind == 0 && s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) return;
+    if (behind == 0 && s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) {
+        s_stat_ttri_drop++;  // counted here too -- the common case, and the one that went unseen
+        return;
+    }
 
     // Shift the coordinates by whole texture periods so all three are
     // >= 0. Repeating makes that invisible, and it lets the rasterizer
@@ -982,6 +996,8 @@ void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uin
                                              v[2].x, v[2].y, v[2].z, s_camera.x, s_camera.y, s_camera.z);
         shade = (uint8_t)(sh * 32.0f + 0.5f);
     }
+    // The game's own light level (SE_TRI_LIGHT), multiplied in.
+    if (flags & SE_TRI_LIGHT_MASK) shade = (uint8_t)((uint32_t)shade * se_tri_light_level(flags) / SE_TRI_LIGHT_MAX);
 
     if (behind == 0) {
         emit_ttri(&c[0], &c[1], &c[2], tex, ush, vsh, shade);

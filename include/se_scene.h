@@ -142,6 +142,28 @@ int  scene_render_scale(void);  // the scale requested for the next frame
 //                    since the per-face normal is skipped too.
 #define SE_TRI_EMISSIVE  (1u << 0)
 
+//   SE_TRI_LIGHT(n)  A light level from the GAME, 0..32 (32 = full),
+//                    multiplied into whatever shade the triangle ends up
+//                    with -- the se_light shade for a lit triangle, full
+//                    strength for an emissive one. For light the engine
+//                    cannot know about: a torch in a cave, the fall of
+//                    night on a block world, anything the game worked
+//                    out per face itself. Carried in bits 8..13 as the
+//                    DARKNESS (32 - n), so a flags value without it --
+//                    every call written before it existed -- means full
+//                    light and draws exactly as before. (Since 2.1.)
+#define SE_TRI_LIGHT_MAX   32u
+#define SE_TRI_LIGHT_SHIFT 8
+#define SE_TRI_LIGHT_MASK  (63u << SE_TRI_LIGHT_SHIFT)
+#define SE_TRI_LIGHT(n) \
+    ((uint32_t)(SE_TRI_LIGHT_MAX - ((uint32_t)(n) > SE_TRI_LIGHT_MAX ? SE_TRI_LIGHT_MAX : (uint32_t)(n))) \
+     << SE_TRI_LIGHT_SHIFT)
+// The level a flags value carries: SE_TRI_LIGHT_MAX when it carries none.
+static inline uint32_t se_tri_light_level(uint32_t flags) {
+    uint32_t const dark = (flags & SE_TRI_LIGHT_MASK) >> SE_TRI_LIGHT_SHIFT;
+    return dark >= SE_TRI_LIGHT_MAX ? 0u : SE_TRI_LIGHT_MAX - dark;
+}
+
 // Submit a world-space triangle. Projected with the current camera and
 // accumulated; rasterized at scene_render(). `argb` is ARGB8888;
 // `flags` is a mask of SE_TRI_* bits (0 for a plain triangle).

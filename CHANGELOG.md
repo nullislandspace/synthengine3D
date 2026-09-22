@@ -17,6 +17,26 @@ release.
 
 Additive only: a 2.0 game builds unchanged.
 
+### Fixed — `scene_drop_stats()` missed most drops (2026-09-22)
+
+A triangle arriving at a full list with no vertex behind the near plane -- by
+far the common case -- was dropped by an early return that did not count it;
+only drops during near-plane clipping were counted. So a game overflowing the
+lists every frame saw a drop count of zero. Found in CraftMiner, where half
+the nearby terrain was vanishing with no warning in the log. Both lists now
+count every drop.
+
+### Added — a light level from the game, per triangle (2026-09-22)
+
+- **`SE_TRI_LIGHT(n)`**, a triangle flag carrying a light level 0..32 that
+  multiplies whatever shade the triangle gets -- the `se_light` shade for a
+  lit triangle, full strength for an emissive one. Flat and textured alike;
+  for a textured face it scales the existing per-face shade factor, so it
+  costs nothing per pixel. For light the engine cannot know: a torch in a
+  cave, night falling on a block world. Stored as the darkness (32 - n) in
+  bits 8..13, so flags written without it mean full light and nothing that
+  exists changes. `se_tri_light_level()` reads it back.
+
 ### Added — bindings a game persists itself (2026-09-22)
 
 - **`se_bindings_config_t.nvs_namespace` may be NULL.** The engine then keeps
