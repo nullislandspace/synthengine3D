@@ -17,6 +17,39 @@ release.
 
 Additive only: a 2.0 game builds unchanged.
 
+### Added — bindings a game persists itself (2026-09-22)
+
+- **`se_bindings_config_t.nvs_namespace` may be NULL.** The engine then keeps
+  the bindings in memory only: `se_bindings_init` starts every control at its
+  default and touches no NVS, and `se_bindings_set` updates the value without
+  writing anything. The game saves and restores them (restoring with
+  `se_bindings_set` after init). For a game whose settings live in a file on
+  the SD card, beside its saves, so one copy backs up everything. A non-NULL
+  namespace behaves exactly as before.
+
+### Added — scrolling list menus (2026-09-22)
+
+- **`se_menu_def_t.visible_rows`.** A menu with more rows than this shows a
+  window of them that keeps the cursor in view, with a caret in the chevron
+  gutter while there is more above or below. The window is worked out from the
+  cursor on every draw, so there is no scroll state to keep: the cursor still
+  counts over all rows and `se_menu_input` is unchanged. 0 (what a 2.0 game's
+  initialisers leave it) draws every row, as before. The field is appended to
+  the end of the struct, so every existing designated initialiser still builds.
+  Written for CraftMiner's Controls menu, 23 rows in a panel that holds seven.
+
+### Changed — `se_ui_capture_key()` binds the cursor keys (2026-09-22)
+
+It refused every escaped scancode (0xE0xx) and mapped only F1-F12 from the
+navigation channel, so the arrow keys -- the grey block generally -- could not
+be captured at all. A game that shipped an arrow key as a default (CraftMiner's
+look keys) could never have it bound back once a player changed it. Now the
+escaped grey keys bind as their scancodes, and a keyboard that sends the cursor
+keys, Home/End or Page Up/Down only as navigation events binds the same
+scancode as one that sends them as scancodes. The "fake shift" codes some
+keyboards wrap round the grey keys are still refused. No signature changes; a
+game gets this by rebuilding, and a binding it already stores is unaffected.
+
 ### Changed — the rasterizer is faster, and says why (2026-09-21)
 
 Measured in CraftMiner on the badge, over a 20-second flight across streamed

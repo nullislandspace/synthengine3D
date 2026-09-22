@@ -184,35 +184,54 @@ void se_frame_present(void) {
 // ---- Rebind key capture ---------------------------------------------
 
 // Map one input event to the BSP scancode it would bind, or 0 if it is
-// not a single bindable key press. Function keys arrive on the navigation
-// channel but have scancode equivalents; plain keys arrive as single-byte
-// scancode presses (release events have the high bit set; escaped
-// multi-byte scancodes >= 0xE000 don't make sensible single-key binds).
+// not a single bindable key press.
+//
+// Plain keys arrive as single-byte scancode presses (a release has
+// BSP_INPUT_SCANCODE_RELEASE_MODIFIER set). The cursor keys and the
+// grey block (Home, End, Page Up/Down, Insert, Delete) are ESCAPED
+// scancodes, 0xE0xx, and they bind like any other: a binding is a
+// uint16_t and gl_input_read_scancode polls an escaped code as happily
+// as a plain one. They were refused until 2.1, which made the arrow keys
+// -- a natural default for looking or steering -- impossible to bind
+// back once a player had changed them. Only the "fake shift" codes some
+// keyboards wrap round the grey keys are refused, since they are not a
+// key anyone pressed.
+//
+// Some keyboards send the cursor keys and the function keys only on the
+// navigation channel, so those map onto the scancode the other keyboards
+// send: the same physical key must bind to the same value whichever
+// keyboard pressed it.
 static uint16_t se_bindable_scancode(bsp_input_event_t const* ev) {
     if (ev->type == INPUT_EVENT_TYPE_NAVIGATION && ev->args_navigation.state) {
         switch (ev->args_navigation.key) {
-            case BSP_INPUT_NAVIGATION_KEY_F1:  return BSP_INPUT_SCANCODE_F1;
-            case BSP_INPUT_NAVIGATION_KEY_F2:  return BSP_INPUT_SCANCODE_F2;
-            case BSP_INPUT_NAVIGATION_KEY_F3:  return BSP_INPUT_SCANCODE_F3;
-            case BSP_INPUT_NAVIGATION_KEY_F4:  return BSP_INPUT_SCANCODE_F4;
-            case BSP_INPUT_NAVIGATION_KEY_F5:  return BSP_INPUT_SCANCODE_F5;
-            case BSP_INPUT_NAVIGATION_KEY_F6:  return BSP_INPUT_SCANCODE_F6;
-            case BSP_INPUT_NAVIGATION_KEY_F7:  return BSP_INPUT_SCANCODE_F7;
-            case BSP_INPUT_NAVIGATION_KEY_F8:  return BSP_INPUT_SCANCODE_F8;
-            case BSP_INPUT_NAVIGATION_KEY_F9:  return BSP_INPUT_SCANCODE_F9;
-            case BSP_INPUT_NAVIGATION_KEY_F10: return BSP_INPUT_SCANCODE_F10;
-            case BSP_INPUT_NAVIGATION_KEY_F11: return BSP_INPUT_SCANCODE_F11;
-            case BSP_INPUT_NAVIGATION_KEY_F12: return BSP_INPUT_SCANCODE_F12;
+            case BSP_INPUT_NAVIGATION_KEY_F1:    return BSP_INPUT_SCANCODE_F1;
+            case BSP_INPUT_NAVIGATION_KEY_F2:    return BSP_INPUT_SCANCODE_F2;
+            case BSP_INPUT_NAVIGATION_KEY_F3:    return BSP_INPUT_SCANCODE_F3;
+            case BSP_INPUT_NAVIGATION_KEY_F4:    return BSP_INPUT_SCANCODE_F4;
+            case BSP_INPUT_NAVIGATION_KEY_F5:    return BSP_INPUT_SCANCODE_F5;
+            case BSP_INPUT_NAVIGATION_KEY_F6:    return BSP_INPUT_SCANCODE_F6;
+            case BSP_INPUT_NAVIGATION_KEY_F7:    return BSP_INPUT_SCANCODE_F7;
+            case BSP_INPUT_NAVIGATION_KEY_F8:    return BSP_INPUT_SCANCODE_F8;
+            case BSP_INPUT_NAVIGATION_KEY_F9:    return BSP_INPUT_SCANCODE_F9;
+            case BSP_INPUT_NAVIGATION_KEY_F10:   return BSP_INPUT_SCANCODE_F10;
+            case BSP_INPUT_NAVIGATION_KEY_F11:   return BSP_INPUT_SCANCODE_F11;
+            case BSP_INPUT_NAVIGATION_KEY_F12:   return BSP_INPUT_SCANCODE_F12;
+            case BSP_INPUT_NAVIGATION_KEY_UP:    return BSP_INPUT_SCANCODE_ESCAPED_GREY_UP;
+            case BSP_INPUT_NAVIGATION_KEY_DOWN:  return BSP_INPUT_SCANCODE_ESCAPED_GREY_DOWN;
+            case BSP_INPUT_NAVIGATION_KEY_LEFT:  return BSP_INPUT_SCANCODE_ESCAPED_GREY_LEFT;
+            case BSP_INPUT_NAVIGATION_KEY_RIGHT: return BSP_INPUT_SCANCODE_ESCAPED_GREY_RIGHT;
+            case BSP_INPUT_NAVIGATION_KEY_HOME:  return BSP_INPUT_SCANCODE_ESCAPED_GREY_HOME;
+            case BSP_INPUT_NAVIGATION_KEY_END:   return BSP_INPUT_SCANCODE_ESCAPED_GREY_END;
+            case BSP_INPUT_NAVIGATION_KEY_PGUP:  return BSP_INPUT_SCANCODE_ESCAPED_GREY_PGUP;
+            case BSP_INPUT_NAVIGATION_KEY_PGDN:  return BSP_INPUT_SCANCODE_ESCAPED_GREY_PGDN;
             default: return 0;
         }
     }
     if (ev->type == INPUT_EVENT_TYPE_SCANCODE) {
         uint16_t const sc = ev->args_scancode.scancode;
-        if (sc != BSP_INPUT_SCANCODE_NONE
-            && (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) == 0
-            && sc < 0xE000u) {
-            return sc;
-        }
+        if (sc == BSP_INPUT_SCANCODE_NONE || (sc & BSP_INPUT_SCANCODE_RELEASE_MODIFIER) != 0) return 0;
+        if (sc == BSP_INPUT_SCANCODE_ESCAPED_FAKE_LSHIFT || sc == BSP_INPUT_SCANCODE_ESCAPED_FAKE_RSHIFT) return 0;
+        if (sc < 0xE000u || (sc & 0xFF00u) == 0xE000u) return sc;
     }
     return 0;
 }

@@ -29,6 +29,13 @@ typedef struct {
 
 // The game's control set + where to persist it. `defs` is retained by
 // reference -- it must outlive use (point it at static storage).
+//
+// `nvs_namespace` NULL (since 2.1) means the engine does not persist at
+// all: bindings start at their defaults, se_bindings_set changes only
+// the value in memory, and saving and loading are the game's -- for a
+// game that keeps its settings in a file on the SD card, where a player
+// can back them up with their saves. The game restores its saved values
+// after se_bindings_init with se_bindings_set.
 typedef struct {
     char const*             nvs_namespace;
     se_binding_def_t const* defs;

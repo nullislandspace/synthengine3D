@@ -24,6 +24,7 @@ typedef struct {
     char const*          title, *subtitle, *hint;
     se_menu_row_t const* rows;  int row_count;
     float title_h, row_h, value_dx, panel_w, panel_h;  // 0 -> sensible default
+    int   visible_rows;  // 0 -> all; more rows than this scroll (2.1)
 } se_menu_def_t;
 
 typedef struct { se_menu_def_t const* def; int cursor; } se_menu_t;
@@ -41,6 +42,11 @@ if (right)     r = se_menu_input(&menu, SE_MENU_ACT_RIGHT);
 if (enter)     r = se_menu_input(&menu, SE_MENU_ACT_ACTIVATE);
 if (escape)    r = se_menu_input(&menu, SE_MENU_ACT_BACK);
 ```
+
+**Long lists scroll.** Set `visible_rows` and a menu with more rows than that
+draws only a window of them round the cursor, with a caret in the chevron
+gutter while there is more above or below. There is no scroll position to keep:
+the window follows `menu.cursor`, which still counts over all the rows.
 
 `se_menu_input` returns a `se_menu_result_t`:
 

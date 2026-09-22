@@ -68,6 +68,14 @@ typedef struct {
     float                value_dx;   // value column x offset from label
     float                panel_w;    // panel width fraction (0 -> default)
     float                panel_h;    // panel height fraction(0 -> default)
+    // Rows shown at once (0 -> all of them). A menu with more rows than
+    // this SCROLLS: se_menu_draw shows a window of `visible_rows` that
+    // keeps the cursor in view, with a marker above and below while
+    // there is more that way. The cursor still counts over every row, so
+    // se_menu_input and the game's row handling are unchanged. Added in
+    // 2.1, last in the struct, so a 2.0 game's initialisers still build
+    // and leave it 0.
+    int                  visible_rows;
 } se_menu_def_t;
 
 // A live menu: a definition + the current cursor. Zero-initialise, set
@@ -113,7 +121,9 @@ se_menu_result_t se_menu_input(se_menu_t* menu, se_menu_action_t action);
 
 // Draw the menu into `fb`: a dim panel, the title, an optional subtitle,
 // the rows (label + value per row kind, chevron on the selected row), and
-// an optional footer hint. Pure rendering -- no state change.
+// an optional footer hint. Pure rendering -- no state change. With
+// `visible_rows` set and exceeded, only the window round the cursor is
+// drawn (see se_menu_def_t).
 void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb);
 
 // Blocking "press a key" capture for a key rebind. Pumps engine frames --
@@ -122,7 +132,10 @@ void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb);
 // `prompt_label` (e.g. the control's name) is shown under the heading;
 // NULL for none. Any physical key binds, including F-keys and the volume
 // keys / F1 that the run loop would otherwise consume (the capture drains
-// the input queue itself, so those reach it here). Returns 0 only if the
+// the input queue itself, so those reach it here), and -- since 2.1 -- the
+// cursor keys and the rest of the grey block, as their escaped 0xE0xx
+// scancodes. A keyboard that sends those only as navigation events binds
+// the same scancode as one that sends them as scancodes. Returns 0 only if the
 // loop is asked to exit (se_request_exit) before a key is pressed.
 //   (Implemented in the run loop -- it needs the engine's frame
 //   primitives -- but declared here with the rest of the UI surface.)

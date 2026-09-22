@@ -46,6 +46,9 @@ void se_bindings_init(se_bindings_config_t const* cfg) {
         s_current[i] = s_cfg.defs[i].default_sc;
     }
 
+    // No namespace: the game keeps the bindings itself (see se_bindings.h).
+    if (s_cfg.nvs_namespace == NULL) return;
+
     nvs_handle_t h;
     esp_err_t    err = nvs_open(s_cfg.nvs_namespace, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -74,6 +77,7 @@ void se_bindings_set(int id, uint16_t sc) {
     int const i = index_of(id);
     if (i < 0 || s_current[i] == sc) return;
     s_current[i] = sc;
+    if (s_cfg.nvs_namespace == NULL) return;  // the game persists it
 
     nvs_handle_t h;
     if (nvs_open(s_cfg.nvs_namespace, NVS_READWRITE, &h) != ESP_OK) {

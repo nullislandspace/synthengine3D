@@ -155,11 +155,31 @@ void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb) {
         y += 14.0f;
     }
 
-    for (int i = 0; i < m->row_count; i++) {
+    // The window of rows on show. Stateless: it is worked out from the
+    // cursor every frame, centred on it where the list allows, so there
+    // is no scroll position for a game to keep or get out of step with.
+    int first = 0, shown = m->row_count;
+    if (m->visible_rows > 0 && m->row_count > m->visible_rows) {
+        shown = m->visible_rows;
+        first = menu->cursor - shown / 2;
+        if (first > m->row_count - shown) first = m->row_count - shown;
+        if (first < 0) first = 0;
+        // More above / more below, in the chevron gutter: a small caret
+        // just outside the first and last rows shown.
+        if (first > 0) {
+            draw_left(fb, chevron_x, y - row_h * 0.45f, 16.0f, SE_UI_COL_HINT, "^");
+        }
+        if (first + shown < m->row_count) {
+            draw_left(fb, chevron_x, y + (float)shown * row_h - row_h * 0.30f, 16.0f, SE_UI_COL_HINT, "v");
+        }
+    }
+
+    for (int k = 0; k < shown; k++) {
+        int const            i   = first + k;
         se_menu_row_t const* r   = &m->rows[i];
         bool const           sel = (i == menu->cursor);
         pax_col_t  const     col = sel ? SE_UI_COL_HILITE : SE_UI_COL_NORMAL;
-        float const          ry  = y + (float)i * row_h;
+        float const          ry  = y + (float)k * row_h;
         if (sel) {
             draw_left(fb, chevron_x, ry, SE_UI_ROW_TEXT_H, SE_UI_COL_HILITE, ">");
         }
