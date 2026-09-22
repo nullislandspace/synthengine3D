@@ -299,3 +299,22 @@
 #ifndef SE_SCENE_POINT_CAP
 #define SE_SCENE_POINT_CAP  1024
 #endif
+
+// ---- Depth plane in internal SRAM at quarter resolution --------------
+//
+// Off by default. When a game defines this to 1, scene_init() also
+// allocates a 16-bit depth plane for the QUARTER-resolution target
+// (scene_set_render_scale(2): 400 x 240 x 2 bytes = 188 KB) in internal
+// SRAM, and every frame drawn at that scale depth-tests against it
+// instead of the stamped PSRAM plane. It is cleared once per frame (a
+// memset of internal SRAM) instead of being stamped. Full-resolution
+// frames still use the PSRAM plane: 750 KB of depth never fits inside.
+//
+// It is allocated BEFORE the geometry lists, so the lists that no
+// longer fit inside fall back to PSRAM. That is the trade: the depth
+// plane is touched at random once per covered pixel, the lists are
+// written and read once in order. A game that turns it on should
+// measure both sides.
+#ifndef SE_SCENE_DEPTH16_INTERNAL
+#define SE_SCENE_DEPTH16_INTERNAL  0
+#endif

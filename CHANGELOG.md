@@ -17,6 +17,32 @@ release.
 
 Additive only: a 2.0 game builds unchanged.
 
+### Added — a quarter-resolution depth plane in internal SRAM (2026-09-22)
+
+`SE_SCENE_DEPTH16_INTERNAL` (`se_config.h`, default 0). When a game sets it,
+frames drawn at `scene_set_render_scale(2)` depth-test against a plain 16-bit
+plane in internal SRAM (188 KB, cleared at `scene_begin()`) instead of the
+stamped PSRAM plane. It is allocated before the geometry lists, so the lists
+that no longer fit fall back to PSRAM. In CraftMiner it cut the per-pixel cost
+by about 30% (flat 178 -> 122 ns, textured ~200 -> ~150 ns). Full resolution
+is unchanged.
+
+`se_geometry_t` gains `depth16`, appended at the end: on such frames `depth`
+is NULL and `depth16` holds the plane (no stamp, 0 = infinitely far). With the
+option off, `depth16` is always NULL and nothing else changes.
+
+### Changed — depth order is a key sort (2026-09-22)
+
+`depth_order` no longer qsorts the triangle records. Each triangle gets a
+32-bit key in internal SRAM (16-bit depth over its 16-bit index); the keys are
+radix sorted and the records gathered once into a second buffer, which then
+swaps places with the list. The order is the same to within 1 part in 128 of
+the depth sum; ties never change the image. Costs 8 bytes of internal SRAM per
+triangle of the larger list's cap, plus one more list-sized buffer in the list's own
+memory; falls back to qsort without them. Far view prep time in CraftMiner:
+17.3 -> 10.5 ms with the lists in PSRAM. The list caps must stay at or below 65536
+(a static assert).
+
 ### Fixed — `scene_drop_stats()` missed most drops (2026-09-22)
 
 A triangle arriving at a full list with no vertex behind the near plane -- by

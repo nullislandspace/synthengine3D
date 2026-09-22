@@ -8,6 +8,7 @@
 #include "se_direct565.h"   // direct_565_logical_index, direct_565_pack
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"  // esp_ptr_internal (depth-order gather buffers)
 #include "esp_timer.h"      // scene_raster_stats per-phase timing
 #include "se_light_internal.h"  // se_light_is_on / se_light_shade_tri
 #include "se_scene_internal.h"  // scene_textured_reserve (called by se_texture_load)
@@ -149,6 +150,14 @@ typedef se_tri_t scene_tri_t;
 typedef se_seg_t scene_seg_t;
 
 static uint32_t*    s_ds      = NULL;   // (stamp << 16) | depth, indexed like the fb
+
+// The quarter-resolution depth plane in internal SRAM (se_config.h,
+// SE_SCENE_DEPTH16_INTERNAL): plain 16-bit depth, 0 = infinitely far,
+// cleared at scene_begin(). s_dz_on says whether THIS frame uses it --
+// only frames drawn at scale 2 do; full resolution keeps s_ds.
+#define SCENE_DZ_PIXELS ((DISPLAY_LOG_W / 2) * (DISPLAY_RAW_STRIDE / 2))
+static uint16_t*    s_dz      = NULL;
+static bool         s_dz_on   = false;
 static scene_tri_t* s_tris    = NULL;   // accumulated triangles (this frame)
 static int          s_tri_n   = 0;
 static scene_seg_t* s_lines   = NULL;   // accumulated wireframe edges
@@ -216,6 +225,23 @@ void scene_init(void) {
     // far too big for internal SRAM, and touched only during the rasterize
     // pass, so it stays in PSRAM.
     s_ds = heap_caps_malloc(SCENE_PIXELS * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+
+#if SE_SCENE_DEPTH16_INTERNAL
+    // Before the geometry lists, so it gets the internal SRAM they would
+    // have taken; they fall back to PSRAM below (se_config.h). Without
+    // room for it, frames at scale 2 use s_ds as they always did.
+    s_dz = heap_caps_malloc(SCENE_DZ_PIXELS * sizeof(uint16_t), MALLOC_CAP_INTERNAL);
+    if (s_dz != NULL) {
+        int64_t const c0 = esp_timer_get_time();
+        memset(s_dz, 0, SCENE_DZ_PIXELS * sizeof(uint16_t));
+        ESP_LOGI(TAG, "quarter-resolution depth plane: INTERNAL (%uKB, clear %lld us)",
+                 (unsigned)(SCENE_DZ_PIXELS * sizeof(uint16_t) / 1024), (long long)(esp_timer_get_time() - c0));
+    } else {
+        ESP_LOGW(TAG, "no internal SRAM for the quarter-resolution depth plane (%uKB, largest free %uKB): using PSRAM",
+                 (unsigned)(SCENE_DZ_PIXELS * sizeof(uint16_t) / 1024),
+                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+    }
+#endif
 
     // The deferred geometry lists go in INTERNAL SRAM when they fit. The
     // emit + cull + order passes run on them while the PPA backdrop DMA
@@ -293,6 +319,10 @@ void scene_begin(pax_buf_t* fb) {
     // is never mistaken for "written this frame".
     s_frame++;
     if (s_frame == 0) s_frame = 1;
+    // The internal plane has no stamps: it is emptied instead, which
+    // for internal SRAM costs less than a stamp compare per pixel.
+    s_dz_on = s_dz != NULL && s_div == 2;
+    if (s_dz_on) memset(s_dz, 0, SCENE_DZ_PIXELS * sizeof(uint16_t));
 }
 
 bool scene_textured_reserve(void) {
@@ -433,18 +463,19 @@ static inline int floor_i(float v) {
 // inner loop is one float add per pixel (no multiply, no clamp on the
 // high end). Under PAX_O_ROT_CW a +1 logical-y step is a -1 step in
 // the fb / depth / stamp indices alike.
-static inline void scene_vrun(int lx, int y_top, int y_bot,
-                              float As, float Bs, float Cs, uint16_t packed) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
-    if (y_top > y_bot) return;
-
+//
+// Every run function exists twice over, one per depth plane: `d16`
+// is a compile-time constant at each call (the wrappers below), so each
+// copy's inner loop is branch-free on it.
+static inline __attribute__((always_inline))
+void scene_vrun_body(int lx, int y_top, int y_bot,
+                     float As, float Bs, float Cs, uint16_t packed, bool const d16) {
     uint16_t const frame = s_frame;
     uint32_t const fhi   = (uint32_t)frame << 16;   // stamp pre-shifted for the store
     int const idx = scene_index(lx, y_top);
     uint16_t* fp  = s_fb + idx;
     uint32_t* dp  = s_ds + idx;
+    uint16_t* zp  = s_dz + idx;
     float     d   = As * (float)lx + Bs * (float)y_top + Cs;
     int       cnt = y_bot - y_top + 1;
     s_stat_tri_px += cnt;
@@ -452,16 +483,35 @@ static inline void scene_vrun(int lx, int y_top, int y_bot,
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;                      // sub-pixel edge overshoot guard
-        uint32_t const cell   = *dp;
-        // Stale stamp (≠ this frame) reads as depth 0 (infinitely far).
-        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
-        if ((uint16_t)di > stored) {
-            *dp = fhi | (uint16_t)di;
-            *fp = packed;
+        if (d16) {
+            if ((uint16_t)di > *zp) {
+                *zp = (uint16_t)di;
+                *fp = packed;
+            }
+            zp--;
+        } else {
+            uint32_t const cell   = *dp;
+            // Stale stamp (≠ this frame) reads as depth 0 (infinitely far).
+            uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+            if ((uint16_t)di > stored) {
+                *dp = fhi | (uint16_t)di;
+                *fp = packed;
+            }
+            dp--;
         }
-        fp--; dp--;
+        fp--;
         d += Bs;
     }
+}
+
+static inline void scene_vrun(int lx, int y_top, int y_bot,
+                              float As, float Bs, float Cs, uint16_t packed) {
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (y_top > y_bot) return;
+    if (s_dz_on) scene_vrun_body(lx, y_top, y_bot, As, Bs, Cs, packed, true);
+    else         scene_vrun_body(lx, y_top, y_bot, As, Bs, Cs, packed, false);
 }
 
 // Depth-tested flat-shaded triangle. Same logical-X column scan as
@@ -554,17 +604,14 @@ typedef struct {
     uint32_t        shade;        // 0..32
 } ttri_setup_t;
 
-static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
-    if (y_top > y_bot) return;
-
+static inline __attribute__((always_inline))
+void scene_vrun_tex_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
     int const       idx   = scene_index(lx, y_top);
     uint16_t*       fp    = s_fb + idx;
     uint32_t*       dp    = s_ds + idx;
+    uint16_t*       zp    = s_dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -580,10 +627,11 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
-        uint32_t const cell   = *dp;
-        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
         if ((uint16_t)di > stored) {
-            *dp = fhi | (uint16_t)di;
+            if (d16) *zp = (uint16_t)di;
+            else     *dp = fhi | (uint16_t)di;
             // di >= 1 here, so d >= 1: the divide is safe.
             float const    inv = 1.0f / d;
             uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
@@ -599,7 +647,8 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
             *fp = px;
         }
         fp--;
-        dp--;
+        if (d16) zp--;
+        else     dp--;
         d  += Bd;
         us += Bu;
         vs += Bv;
@@ -611,17 +660,14 @@ static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t con
 // neither colour nor depth, so whatever lies behind shows through. A
 // sibling rather than a flag in the loop above, so opaque textures run
 // exactly the code they always did.
-static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
-    if (y_top > y_bot) return;
-
+static inline __attribute__((always_inline))
+void scene_vrun_tex_cutout_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
     int const       idx   = scene_index(lx, y_top);
     uint16_t*       fp    = s_fb + idx;
     uint32_t*       dp    = s_ds + idx;
+    uint16_t*       zp    = s_dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -637,8 +683,8 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
-        uint32_t const cell   = *dp;
-        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
         if ((uint16_t)di > stored) {
             // di >= 1 here, so d >= 1: the divide is safe.
             float const    inv = 1.0f / d;
@@ -646,7 +692,8 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
             uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
             uint32_t const t   = tx[(tv << wl) | tu];
             if (t != SE_TEXEL_CUTOUT) {
-                *dp        = fhi | (uint16_t)di;
+                if (d16) *zp = (uint16_t)di;
+                else     *dp = fhi | (uint16_t)di;
                 uint32_t x = (t | (t << 16)) & 0x07E0F81Fu;
                 x          = ((x * sh) >> 5) & 0x07E0F81Fu;
                 uint16_t px = (uint16_t)(x | (x >> 16));
@@ -655,11 +702,30 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
             }
         }
         fp--;
-        dp--;
+        if (d16) zp--;
+        else     dp--;
         d  += Bd;
         us += Bu;
         vs += Bv;
     }
+}
+
+static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (y_top > y_bot) return;
+    if (s_dz_on) scene_vrun_tex_body(lx, y_top, y_bot, st, true);
+    else         scene_vrun_tex_body(lx, y_top, y_bot, st, false);
+}
+
+static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
+    if (lx < s_vp_x0 || lx > s_vp_x1) return;
+    if (y_top < s_vp_y0) y_top = s_vp_y0;
+    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (y_top > y_bot) return;
+    if (s_dz_on) scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, true);
+    else         scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, false);
 }
 
 static void scene_raster_ttri(se_ttri_t const* t) {
@@ -773,6 +839,8 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     int const idx = scene_index(x0, y0);
     uint16_t* fp  = s_fb + idx;
     uint32_t* dp  = s_ds + idx;
+    uint16_t* zp  = s_dz + idx;
+    bool const d16 = s_dz_on;
     int       lx  = x0;
     int       ly  = y0;
 
@@ -780,14 +848,14 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
         if (lx >= s_vp_x0 && lx <= s_vp_x1 && ly >= s_vp_y0 && ly <= s_vp_y1) {
             int di = (int)d;
             if (di < 0) di = 0;
-            uint32_t const cell   = *dp;
-            uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+            uint16_t const stored =
+                d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
             if ((uint16_t)di >= stored) *fp = packed;   // edges test depth but never write it
         }
         if (lx == x1 && ly == y1) break;
         int const e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; dp += ptr_dx; }
-        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; dp += ptr_dy; }
+        if (e2 > -dy) { err -= dy; lx += sx; fp += ptr_dx; dp += ptr_dx; zp += ptr_dx; }
+        if (e2 <  dx) { err += dx; ly += sy; fp += ptr_dy; dp += ptr_dy; zp += ptr_dy; }
         d += dd;
     }
 }
@@ -1053,8 +1121,8 @@ void se_scene_raster_points(void) {
         int const      x  = (int)lroundf(pt->v.sx), y = (int)lroundf(pt->v.sy);
         if (x < s_vp_x0 || x > s_vp_x1 || y < s_vp_y0 || y > s_vp_y1) continue;
         int const      idx    = scene_index(x, y);
-        uint32_t const cell   = s_ds[idx];
-        uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
+        uint16_t const stored =
+            s_dz_on ? s_dz[idx] : ((uint16_t)(s_ds[idx] >> 16) == frame) ? (uint16_t)s_ds[idx] : 0;
         int            di     = (int)(pt->v.w * SCENE_DEPTH_SCALE);
         if (di < 0) di = 0;
         if ((uint16_t)di >= stored) s_fb[idx] = pt->packed;
@@ -1187,17 +1255,122 @@ static int ttri_cmp_near_first(void const* pa, void const* pb) {
     return 0;
 }
 
+// The sort itself is a KEY sort, not a qsort of the lists: qsort moves
+// 40- and 68-byte records around with a comparator call per compare,
+// and when the lists live in PSRAM (SE_SCENE_DEPTH16_INTERNAL pushes
+// them there) that cost the far view 5 ms a frame. Instead each
+// triangle gets one uint32 in internal SRAM -- a 16-bit depth key over
+// its 16-bit index -- the keys are radix sorted (two 8-bit passes, on
+// the key half only; stable), and the records are then gathered once,
+// in order, into a second buffer that swaps places with the first.
+//
+// The depth key is the top 16 bits of the float w-sum (sign, exponent,
+// 7 mantissa bits): positive floats order like their bit patterns, so
+// that is the same order to within 1 part in 128, and a tie is harmless
+// (see tri_cmp_near_first). Inverted, so nearer sorts first.
+//
+// Without room for the keys or the second buffer, the qsort stays.
+_Static_assert(SE_SCENE_TRI_CAP <= 65536 && SE_SCENE_TEXTURED_TRI_CAP <= 65536,
+               "the key sort keeps a triangle's index in 16 bits");
+#define ORDER_KEY_CAP (SE_SCENE_TRI_CAP > SE_SCENE_TEXTURED_TRI_CAP ? SE_SCENE_TRI_CAP : SE_SCENE_TEXTURED_TRI_CAP)
+static uint32_t*    s_ok       = NULL;   // keys, internal SRAM
+static uint32_t*    s_ok_tmp   = NULL;   // radix scratch, internal SRAM
+static scene_tri_t* s_tris_alt = NULL;   // gather target, swaps with s_tris
+static se_ttri_t*   s_ttris_alt = NULL;  // ... and with s_ttris
+static bool         s_ok_failed = false;
+
+static bool order_keys_reserve(void) {
+    if (s_ok != NULL) return true;
+    if (s_ok_failed) return false;
+    s_ok     = heap_caps_malloc(ORDER_KEY_CAP * sizeof(uint32_t), MALLOC_CAP_INTERNAL);
+    s_ok_tmp = heap_caps_malloc(ORDER_KEY_CAP * sizeof(uint32_t), MALLOC_CAP_INTERNAL);
+    if (s_ok == NULL || s_ok_tmp == NULL) {
+        ESP_LOGW(TAG, "no internal SRAM for depth-order keys (%uKB): sorting with qsort",
+                 (unsigned)(2 * ORDER_KEY_CAP * sizeof(uint32_t) / 1024));
+        free(s_ok);
+        free(s_ok_tmp);
+        s_ok = s_ok_tmp = NULL;
+        s_ok_failed = true;
+        return false;
+    }
+    return true;
+}
+
+// Allocate the gather buffer for a list like `list` -- in the same kind
+// of memory, so the swap never moves a list somewhere slower.
+static void* order_alt_alloc(void const* list, size_t sz) {
+    uint32_t const caps = esp_ptr_internal(list) ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM;
+    return heap_caps_malloc(sz, caps);
+}
+
+static inline uint32_t order_key(float wsum, int i) {
+    uint32_t bits;
+    memcpy(&bits, &wsum, sizeof(bits));
+    if ((int32_t)bits < 0) bits = 0;   // a negative w-sum cannot happen; sort it last
+    return ((0xFFFFu - (bits >> 16)) << 16) | (uint32_t)i;
+}
+
+// Stable LSD radix sort of s_ok[0..n) on bits 16..31.
+static void order_radix(int n) {
+    uint32_t* src = s_ok;
+    uint32_t* dst = s_ok_tmp;
+    for (int shift = 16; shift < 32; shift += 8) {
+        uint32_t count[256] = {0};
+        for (int i = 0; i < n; i++) count[(src[i] >> shift) & 0xFFu]++;
+        uint32_t sum = 0;
+        for (int b = 0; b < 256; b++) {
+            uint32_t const c = count[b];
+            count[b] = sum;
+            sum += c;
+        }
+        for (int i = 0; i < n; i++) dst[count[(src[i] >> shift) & 0xFFu]++] = src[i];
+        uint32_t* const t = src;
+        src = dst;
+        dst = t;
+    }
+    // Two passes: the sorted keys are back in s_ok.
+}
+
 static void scene_order_pass(void) {
     if (!s_opts.depth_order) return;
+    bool const keys = order_keys_reserve();
     if (s_tri_n > 1) {
-        qsort(s_tris, (size_t)s_tri_n, sizeof(scene_tri_t), tri_cmp_near_first);
+        if (keys && s_tris_alt == NULL) s_tris_alt = order_alt_alloc(s_tris, (size_t)SCENE_TRI_CAP * sizeof(scene_tri_t));
+        if (keys && s_tris_alt != NULL) {
+            for (int i = 0; i < s_tri_n; i++) {
+                scene_tri_t const* t = &s_tris[i];
+                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i);
+            }
+            order_radix(s_tri_n);
+            for (int i = 0; i < s_tri_n; i++) s_tris_alt[i] = s_tris[s_ok[i] & 0xFFFFu];
+            scene_tri_t* const t = s_tris;
+            s_tris     = s_tris_alt;
+            s_tris_alt = t;
+        } else {
+            qsort(s_tris, (size_t)s_tri_n, sizeof(scene_tri_t), tri_cmp_near_first);
+        }
     }
     // Sorted within their own list: the two lists rasterize one after
     // the other, so they cannot interleave. Early-z pays off more here
     // than for flat triangles, since an occluded textured pixel skips a
     // divide and a texel fetch as well as the framebuffer write.
     if (s_ttri_n > 1) {
-        qsort(s_ttris, (size_t)s_ttri_n, sizeof(se_ttri_t), ttri_cmp_near_first);
+        if (keys && s_ttris_alt == NULL) {
+            s_ttris_alt = order_alt_alloc(s_ttris, (size_t)SE_SCENE_TEXTURED_TRI_CAP * sizeof(se_ttri_t));
+        }
+        if (keys && s_ttris_alt != NULL) {
+            for (int i = 0; i < s_ttri_n; i++) {
+                se_ttri_t const* t = &s_ttris[i];
+                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i);
+            }
+            order_radix(s_ttri_n);
+            for (int i = 0; i < s_ttri_n; i++) s_ttris_alt[i] = s_ttris[s_ok[i] & 0xFFFFu];
+            se_ttri_t* const t = s_ttris;
+            s_ttris     = s_ttris_alt;
+            s_ttris_alt = t;
+        } else {
+            qsort(s_ttris, (size_t)s_ttri_n, sizeof(se_ttri_t), ttri_cmp_near_first);
+        }
     }
 }
 
@@ -1572,7 +1745,8 @@ se_geometry_t se_scene_geometry(void) {
         .segs        = s_lines,
         .seg_n       = s_line_n,
         .fb          = s_fb,
-        .depth       = s_ds,
+        .depth       = s_dz_on ? NULL : s_ds,
+        .depth16     = s_dz_on ? s_dz : NULL,
         .frame       = s_frame,
         .depth_scale = SCENE_DEPTH_SCALE,
         .ttris       = s_ttris,

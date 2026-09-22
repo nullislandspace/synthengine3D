@@ -453,6 +453,13 @@ char const* se_renderer_name(se_render_mode_t mode);
 // anything else is a stale cell from an earlier frame and must read as
 // infinitely far. This is what lets the engine skip clearing the depth
 // buffer -- do not memset it, and do not assume it is zero.
+//
+// With SE_SCENE_DEPTH16_INTERNAL (se_config.h), a frame drawn at
+// quarter resolution uses a different plane: `depth` is NULL and
+// `depth16` is one uint16 depth per pixel, same index, no stamp, 0 =
+// infinitely far -- the engine cleared it at scene_begin(). At full
+// resolution, or without the option, `depth16` is NULL and `depth` is
+// as above.
 typedef struct {
     float sx, sy, w;   // screen x/y (logical px) + 1/z depth
 } se_vtx_t;
@@ -503,6 +510,8 @@ typedef struct {
     int             pt_n;
     int             scale;       // this frame's render scale: 2 = quarter resolution --
                                  // screen positions and fb are then half size (see above)
+    uint16_t*       depth16;     // plain depth, 0 = far, when `depth` is NULL (see above).
+                                 // Last, so 2.0 renderers see the layout they were built with.
 } se_geometry_t;
 
 // Snapshot the current frame's geometry + targets. Call from inside a
