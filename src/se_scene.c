@@ -601,8 +601,20 @@ typedef struct {
     uint16_t const* texels;
     uint32_t        wmask, hmask;
     uint32_t        wlog2;
-    uint32_t        shade;        // 0..32
+    uint32_t        shade;        // 0..32, red and green
+    uint32_t        shade_b;      // 0..32, blue -- differs only while a tint is set
 } ttri_setup_t;
+
+// The scene tint (se_scene.h). 32/32 is "no tint", and then the plain
+// raster loops run, byte for byte what they always did.
+static uint8_t s_tint_rg = 32, s_tint_b = 32;
+static bool    s_tint_on;
+
+void se_scene_set_tint(uint8_t rg, uint8_t b) {
+    s_tint_rg = rg > 32 ? 32 : rg;
+    s_tint_b  = b > 32 ? 32 : b;
+    s_tint_on = s_tint_rg != 32 || s_tint_b != 32;
+}
 
 static inline __attribute__((always_inline))
 void scene_vrun_tex_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
@@ -643,6 +655,63 @@ void scene_vrun_tex_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, b
             uint32_t x = (t | (t << 16)) & 0x07E0F81Fu;
             x          = ((x * sh) >> 5) & 0x07E0F81Fu;
             uint16_t px = (uint16_t)(x | (x >> 16));
+            if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+            *fp = px;
+        }
+        fp--;
+        if (d16) zp--;
+        else     dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
+// The same run, TINTED: red and green scaled by one factor and blue by
+// another (se_scene.h, se_scene_set_tint). A sibling rather than a
+// branch in the loop above, exactly as the cut-out body below is, so an
+// untinted scene runs the code it always ran.
+//
+// One multiply becomes two. R (15..11) and G (10..5) go into separate
+// fields of one word and are scaled together; B (4..0) is scaled on its
+// own. Both factors already carry the triangle's own shade, folded in at
+// setup, so this is the whole of the per-pixel cost.
+static inline __attribute__((always_inline))
+void scene_vrun_tex_tint_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = scene_index(lx, y_top);
+    uint16_t*       fp    = s_fb + idx;
+    uint32_t*       dp    = s_ds + idx;
+    uint16_t*       zp    = s_dz + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  shrg  = st->shade, shb = st->shade_b;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    s_stat_ttri_px += cnt;
+    s_stat_ttri_sp++;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
+        if ((uint16_t)di > stored) {
+            if (d16) *zp = (uint16_t)di;
+            else     *dp = fhi | (uint16_t)di;
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            uint32_t       rg  = (t & 0xF800u) | ((t & 0x07E0u) << 16);
+            rg                 = ((rg * shrg) >> 5) & 0x07E0F800u;
+            uint32_t const bb  = (((t & 0x001Fu) * shb) >> 5) & 0x001Fu;
+            uint16_t       px  = (uint16_t)(rg | (rg >> 16) | bb);
             if (rev) px = (uint16_t)((px >> 8) | (px << 8));
             *fp = px;
         }
@@ -710,11 +779,69 @@ void scene_vrun_tex_cutout_body(int lx, int y_top, int y_bot, ttri_setup_t const
     }
 }
 
+// The cut-out run, TINTED. See scene_vrun_tex_tint_body for the two
+// multiplies; everything else is its plain sibling above, unchanged.
+static inline __attribute__((always_inline))
+void scene_vrun_tex_cutout_tint_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = scene_index(lx, y_top);
+    uint16_t*       fp    = s_fb + idx;
+    uint32_t*       dp    = s_ds + idx;
+    uint16_t*       zp    = s_dz + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  shrg  = st->shade, shb = st->shade_b;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    s_stat_ttri_px += cnt;
+    s_stat_ttri_sp++;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
+        if ((uint16_t)di > stored) {
+            // di >= 1 here, so d >= 1: the divide is safe.
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            if (t != SE_TEXEL_CUTOUT) {
+                if (d16) *zp = (uint16_t)di;
+                else     *dp = fhi | (uint16_t)di;
+                uint32_t rg = (t & 0xF800u) | ((t & 0x07E0u) << 16);
+                rg          = ((rg * shrg) >> 5) & 0x07E0F800u;
+                uint32_t const bb = (((t & 0x001Fu) * shb) >> 5) & 0x001Fu;
+                uint16_t px = (uint16_t)(rg | (rg >> 16) | bb);
+                if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+                *fp = px;
+            }
+        }
+        fp--;
+        if (d16) zp--;
+        else     dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
 static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
     if (lx < s_vp_x0 || lx > s_vp_x1) return;
     if (y_top < s_vp_y0) y_top = s_vp_y0;
     if (y_bot > s_vp_y1) y_bot = s_vp_y1;
     if (y_top > y_bot) return;
+    if (s_tint_on) {
+        if (s_dz_on) scene_vrun_tex_tint_body(lx, y_top, y_bot, st, true);
+        else         scene_vrun_tex_tint_body(lx, y_top, y_bot, st, false);
+        return;
+    }
     if (s_dz_on) scene_vrun_tex_body(lx, y_top, y_bot, st, true);
     else         scene_vrun_tex_body(lx, y_top, y_bot, st, false);
 }
@@ -724,6 +851,11 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
     if (y_top < s_vp_y0) y_top = s_vp_y0;
     if (y_bot > s_vp_y1) y_bot = s_vp_y1;
     if (y_top > y_bot) return;
+    if (s_tint_on) {
+        if (s_dz_on) scene_vrun_tex_cutout_tint_body(lx, y_top, y_bot, st, true);
+        else         scene_vrun_tex_cutout_tint_body(lx, y_top, y_bot, st, false);
+        return;
+    }
     if (s_dz_on) scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, true);
     else         scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, false);
 }
@@ -755,7 +887,10 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     st.wmask  = (uint32_t)t->tex->w - 1u;
     st.hmask  = (uint32_t)t->tex->h - 1u;
     st.wlog2  = t->tex->w_log2;
-    st.shade  = t->shade;
+    // The tint rides on the triangle's own shade, so the inner loop pays
+    // two multiplies and no arithmetic beyond them (se_scene.h).
+    st.shade   = (uint32_t)t->shade * s_tint_rg / 32u;
+    st.shade_b = (uint32_t)t->shade * s_tint_b / 32u;
     bool const cutout = t->tex->cutout;
 
     // Column scan, as in scene_raster_tri.
@@ -950,6 +1085,14 @@ void scene_tri(float x0, float y0, float z0,
     if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
                                   s_camera.x, s_camera.y, s_camera.z);
+    }
+    // The scene tint (se_scene.h), folded into the colour here -- a flat
+    // triangle is shaded once, so tinting one costs nothing per pixel.
+    if (s_tint_on) {
+        uint32_t const r = ((argb >> 16) & 0xFFu) * s_tint_rg / 32u;
+        uint32_t const g = ((argb >> 8) & 0xFFu) * s_tint_rg / 32u;
+        uint32_t const b = (argb & 0xFFu) * s_tint_b / 32u;
+        argb             = (argb & 0xFF000000u) | (r << 16) | (g << 8) | b;
     }
     // The game's own light level (SE_TRI_LIGHT), folded into the colour.
     if (flags & SE_TRI_LIGHT_MASK) {

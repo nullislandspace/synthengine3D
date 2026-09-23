@@ -164,6 +164,28 @@ static inline uint32_t se_tri_light_level(uint32_t flags) {
     return dark >= SE_TRI_LIGHT_MAX ? 0u : SE_TRI_LIGHT_MAX - dark;
 }
 
+// --- Tinting everything drawn ----------------------------------------
+//
+// Scale the RED AND GREEN of every triangle by `rg` and the BLUE by `b`,
+// both 0..SE_TRI_LIGHT_MAX where 32 leaves the colour alone. For a game
+// that wants the whole scene to take a cast -- being underwater is the
+// case this was written for, where the water swallows the red and the
+// green and leaves the blue.
+//
+// WHY RED AND GREEN SHARE A FACTOR, and it is not squeamishness about
+// the API: the textured inner loop scales all three RGB565 channels with
+// ONE multiply, by spreading them into separate fields of a 32-bit word
+// (see scene_vrun_tex_body). One multiply cannot scale fields by
+// different amounts; two can, and two is what this is. Three independent
+// channels would want a third. Two is enough for water, which absorbs
+// red and green far faster than blue.
+//
+// Free when it is off: a tint of (32, 32) restores the untinted raster
+// loops, which are the same code they always were. While it is on, the
+// textured path costs one extra multiply per pixel and the flat path
+// nothing at all -- a flat triangle is shaded once, at setup.
+void se_scene_set_tint(uint8_t rg, uint8_t b);
+
 // Submit a world-space triangle. Projected with the current camera and
 // accumulated; rasterized at scene_render(). `argb` is ARGB8888;
 // `flags` is a mask of SE_TRI_* bits (0 for a plain triangle).

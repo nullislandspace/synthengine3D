@@ -15,7 +15,37 @@ release.
 
 ## [2.2] — 2026-09-23
 
-Additive only: a 2.1 game builds unchanged.
+Additive only: a 2.1 game builds unchanged. Still unreleased and still
+being worked on, so it collects everything of this round rather than
+taking a number per change.
+
+### Added — a scene-wide colour tint
+
+```c
+void se_scene_set_tint(uint8_t rg, uint8_t b);   // 0..32, 32 = unchanged
+```
+
+Scales the red and green of every triangle by one factor and the blue by
+another, for a game that wants the whole scene to take a cast. Being
+underwater is the case it was written for: water swallows red first and
+green next and leaves blue.
+
+**Red and green share a factor**, and that is the mechanism showing
+through rather than a shy API. The textured inner loop scales all three
+RGB565 channels with ONE multiply, by spreading them into separate fields
+of a 32-bit word. One multiply cannot scale fields by different amounts;
+two can, and two is what this is. A third channel would want a third
+multiply, and nothing has asked for it.
+
+**It is free when it is off.** The tinted raster loops are siblings of
+the plain ones -- the same pattern the cut-out texture path already uses
+-- so an untinted scene runs the code it always ran. With a tint of
+(32, 32) the two-multiply form was checked against the one-multiply form
+over all 65536 texels at all 33 shade levels and is bit-identical.
+
+While it is on, the textured path costs one extra multiply per pixel.
+The flat path costs nothing at all: a flat triangle is shaded once, at
+setup, so the tint folds into a colour that was being computed anyway.
 
 ### Added — per-class volume, and a way to keep the speaker awake
 
