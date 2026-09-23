@@ -40,14 +40,47 @@ PEN_UP = (-1, -1)
 # today's translations happen to use. Adding a language means adding its
 # alphabet here and making sure the tables below cover it; the check at the
 # end of this script is what turns that into a promise.
+_DUTCH = "áàâäéèêëíìîïóòôöúùûüĳÁÀÂÄÉÈÊËÍÌÎÏÓÒÔÖÚÙÛÜĲ"
+_CYR_RU = ("абвгдежзийклмнопрстуфхцчшщъыьэюяё"
+           "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁ")
+
 LANGUAGES = {
     "en": ("English", ""),  # ASCII, and nothing else
-    "de": ("German", "äöüßÄÖÜẞ"),
-    "nl": ("Dutch", "áàâäéèêëíìîïóòôöúùûüĳÁÀÂÄÉÈÊËÍÌÎÏÓÒÔÖÚÙÛÜĲ"),
-    "nl-BE": ("Flemish", "áàâäéèêëíìîïóòôöúùûüĳÁÀÂÄÉÈÊËÍÌÎÏÓÒÔÖÚÙÛÜĲ"),
-    "fr": ("French", "àâäæçéèêëîïôöùûüÿœÀÂÄÆÇÉÈÊËÎÏÔÖÙÛÜŸŒ"),
+    "sq": ("Albanian", "çëÇË"),
     "bg": ("Bulgarian", "абвгдежзийклмнопрстуфхцчшщъьюя"
                         "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЬЮЯ"),
+    "ca": ("Catalan", "àèéíïòóúüç·ÀÈÉÍÏÒÓÚÜÇ"),
+    "hr": ("Croatian", "čćđšžČĆĐŠŽ"),
+    "cs": ("Czech", "áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"),
+    "da": ("Danish", "æøåÆØÅ"),
+    "nl": ("Dutch", _DUTCH),
+    "et": ("Estonian", "õäöüšžÕÄÖÜŠŽ"),
+    "fi": ("Finnish", "äöåÄÖÅ"),
+    "nl-BE": ("Flemish", _DUTCH),
+    "fr": ("French", "àâäæçéèêëîïôöùûüÿœÀÂÄÆÇÉÈÊËÎÏÔÖÙÛÜŸŒ"),
+    "de": ("German", "äöüßÄÖÜẞ"),
+    "el": ("Greek", "αβγδεζηθικλμνξοπρστυφχψωςάέήίόύώϊϋΐΰ"
+                    "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΆΈΉΊΌΎΏΪΫ"),
+    "hu": ("Hungarian", "áéíóöőúüűÁÉÍÓÖŐÚÜŰ"),
+    "is": ("Icelandic", "áéíóúýþðæöÁÉÍÓÚÝÞÐÆÖ"),
+    "ga": ("Irish", "áéíóúÁÉÍÓÚ"),
+    "it": ("Italian", "àèéìòùÀÈÉÌÒÙ"),
+    "lv": ("Latvian", "āčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ"),
+    "lt": ("Lithuanian", "ąčęėįšųūžĄČĘĖĮŠŲŪŽ"),
+    "no": ("Norwegian", "æøåÆØÅ"),
+    "pl": ("Polish", "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"),
+    "pt": ("Portuguese", "ãõçáéíóúâêôàÃÕÇÁÉÍÓÚÂÊÔÀ"),
+    "ro": ("Romanian", "ăâîșțĂÂÎȘȚ"),
+    "ru": ("Russian", _CYR_RU),
+    "sr": ("Serbian", "абвгдђежзијклљмнњопрстћуфхцчџш"
+                      "АБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧЏШ"),
+    "sk": ("Slovak", "áäčďéíĺľňóôŕšťúýžÁÄČĎÉÍĹĽŇÓÔŔŠŤÚÝŽ"),
+    "sl": ("Slovenian", "čšžČŠŽ"),
+    "es": ("Spanish", "áéíóúüñ¿¡ÁÉÍÓÚÜÑ"),
+    "sv": ("Swedish", "åäöÅÄÖ"),
+    "tr": ("Turkish", "çğıİöşüÇĞÖŞÜ"),
+    "uk": ("Ukrainian", "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя"
+                        "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ"),
 }
 
 # Punctuation any of them may reach for: the quotation marks German, Dutch
@@ -61,13 +94,38 @@ COMMON_PUNCTUATION = "„“”‘’‚«»–—…" "\u00A0\u00AD"
 CYRILLIC = "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
 CYRILLIC_LOWER = "абвгдежзийклмнопрстуфхцчшщъыьэюя"
 
+# Greek, from Hershey's greek SIMPLEX face -- the same weight as the Latin
+# beside it, which the Cyrillic (complex, the only one he drew) is not.
+# 527-550 and 627-650 are the 24 letters in alphabet order.
+GREEK = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"
+GREEK_LOWER = "αβγδεζηθικλμνξοπρστυφχψω"
+
 # Single glyphs lifted straight out of the database, by its glyph number.
 # The numbers are Hershey's own; README.md says how to find one.
+# A glyph that is another one flipped left to right. Hershey drew the
+# Russian Э; the Ukrainian Є is its mirror image, and taking it that way
+# keeps the two identical in weight and shape.
+MIRRORED = {
+    0x0404: 2830,  # |Ye| , the mirror of Э
+    0x0454: 2930,  # |ye| , the mirror of э
+}
+
+# A glyph turned upside down: the Spanish inverted marks, which is what
+# they are.
+ROTATED = {
+    0x00A1: 714,  # inverted !
+    0x00BF: 715,  # inverted ?
+}
+
 ALIASES = {
     0x2018: 2252,  # ' left single quote
     0x2019: 2251,  # ' right single quote
     0x201A: 711,   # , low single quote (a comma, which is what it is)
     0x2013: 2231,  # - en dash
+    0x0406: 509,   # Ukrainian I -- the Latin letter, shape for shape
+    0x0456: 609,   # Ukrainian i
+    0x0408: 510,   # Serbian J
+    0x0458: 610,   # Serbian j
 }
 
 # Glyphs built out of other glyphs, placed left to right. Each part is
@@ -84,6 +142,15 @@ LIGATURES = {
     0x201E: [(711, 0), (711, 1)],       # ,, low double quote
     0x2026: [(710, 0), (710, 2), (710, 2)],  # ... ellipsis
     0x2014: [("emdash", 0)],            # -- em dash
+    # Serbian |Lje| and |Nje| are Л and Н joined to Ь, which is what they
+    # were made from; Hershey's own Cyrillic supplies all three.
+    # -5 is not a guess: it lands |Soft sign|'s stem exactly on the upright
+    # the first letter ends with, so the two SHARE that stroke, which is
+    # what makes the pair one letter instead of two side by side.
+    0x0409: [(2812, 0), (2829, -5)],    # |Lje|
+    0x0459: [(2912, 0), (2929, -5)],    # |lje|
+    0x040A: [(2814, 0), (2829, -5)],    # |Nje|
+    0x045A: [(2914, 0), (2929, -5)],    # |nje|
 }
 
 # Letters no accent can make and no two glyphs can be joined into. Hershey's
@@ -119,23 +186,101 @@ HAND_DRAWN = {
     # Hershey's dash (2231) sits at y = 7 and is 12 wide; an em dash is the
     # same stroke, twice the length.
     "emdash": (24, [(1, 7), (23, 7)]),
+    0x00B7: (10, [(4, 7), (5, 8), (6, 7), (5, 6), (4, 7)]),  # the Catalan middle dot
+
+    # --- Polish: l and L with a stroke across the upright ---------------
+    0x0142: (10, [(5, 21), (5, 0), PEN_UP, (1, 8), (9, 12)]),            # l|stroke|
+    0x0141: (18, [(3, 21), (3, 0), (14, 0), PEN_UP, (0, 11), (8, 15)]),  # L|stroke|
+
+    # --- Croatian / Serbian: d and D with a bar through the ascender ----
+    0x0111: (19, [  # d|stroke|
+        (13, 21), (13, 0), PEN_UP,
+        (13, 11), (11, 13), (8, 14), (5, 13), (3, 11), (2, 7), (3, 3), (5, 1), (8, 0), (11, 1), (13, 3),
+        PEN_UP, (9, 18), (18, 18),
+    ]),
+    0x0110: (21, [  # D|stroke|
+        (4, 21), (4, 0), (10, 0), (14, 2), (16, 6), (16, 15), (14, 19), (10, 21), (4, 21),
+        PEN_UP, (0, 11), (8, 11),
+    ]),
+
+    # --- Icelandic ------------------------------------------------------
+    0x00FE: (19, [  # |thorn|
+        (3, 21), (3, -7), PEN_UP,
+        (3, 12), (5, 14), (8, 15), (12, 14), (15, 11), (16, 7), (15, 3), (12, 0), (8, -1), (5, 0), (3, 2),
+    ]),
+    0x00DE: (19, [  # |Thorn|
+        (3, 21), (3, 0), PEN_UP,
+        (3, 17), (10, 17), (14, 15), (16, 12), (16, 9), (14, 6), (10, 4), (3, 4),
+    ]),
+    0x00F0: (19, [  # |eth|
+        (4, 21), (14, 15), PEN_UP, (8, 19), (14, 21), PEN_UP,
+        (13, 15), (15, 11), (16, 7), (15, 3), (12, 0), (8, -1), (5, 0), (3, 3), (2, 7), (3, 11),
+        (5, 14), (9, 15), (13, 15),
+    ]),
+    0x00D0: (21, [  # |Eth| -- a D with the bar, but the bar crosses the bowl
+        (4, 21), (4, 0), (10, 0), (14, 2), (16, 6), (16, 15), (14, 19), (10, 21), (4, 21),
+        PEN_UP, (1, 11), (9, 11),
+    ]),
+
+    # --- Turkish: the dotless i (the capital with a dot is composed) -----
+    0x0131: (8, [(4, 14), (4, 0)]),
+
+    # --- Ukrainian |Ghe| with an upturn ---------------------------------
+    0x0490: (18, [(3, 0), (3, 21), (13, 21), (13, 25)]),
+    0x0491: (16, [(3, 0), (3, 14), (11, 14), (11, 18)]),
+
+    # --- Serbian --------------------------------------------------------
+    0x040F: (18, [(3, 21), (3, 0), (15, 0), (15, 21), PEN_UP, (9, 0), (9, -5)]),  # |Dzhe|
+    0x045F: (16, [(3, 14), (3, 0), (13, 0), (13, 14), PEN_UP, (8, 0), (8, -5)]),  # |dzhe|
+    0x040B: (19, [  # |Tshe| -- an h with a crossbar
+        (3, 21), (3, 0), PEN_UP, (0, 15), (9, 15), PEN_UP,
+        (3, 11), (6, 14), (10, 15), (14, 14), (16, 11), (16, 0),
+    ]),
+    0x045B: (17, [
+        (3, 21), (3, 0), PEN_UP, (0, 12), (8, 12), PEN_UP,
+        (3, 8), (5, 11), (9, 12), (12, 11), (14, 8), (14, 0),
+    ]),
+    0x0402: (19, [  # |Dje| -- the same, with a tail below
+        (3, 21), (3, 0), PEN_UP, (0, 15), (9, 15), PEN_UP,
+        (3, 11), (6, 14), (10, 15), (14, 14), (16, 11), (16, 2), (14, -2), (10, -4),
+    ]),
+    0x0452: (17, [
+        (3, 21), (3, 0), PEN_UP, (0, 12), (8, 12), PEN_UP,
+        (3, 8), (5, 11), (9, 12), (12, 11), (14, 8), (14, 0), (12, -4), (8, -5),
+    ]),
+
+    # --- Greek's final sigma, which Hershey's 24 do not include ---------
+    0x03C2: (16, [
+        (13, 13), (10, 14), (6, 14), (3, 12), (2, 9), (3, 6), (6, 4), (9, 3), (10, 1), (9, -2), (6, -4),
+    ]),
 }
 
 # An accent is a shape and a rule for where it sits. x is measured from the
 # middle of the letter it goes over, y up from wherever the accent is placed,
 # so one definition serves |a|, |A| and |i| alike.
+# (name, strokes, below): `below` puts it under the baseline instead of
+# over the letter, and the renderer reads that flag rather than knowing
+# which accents are which.
 ACCENTS = [
-    ("NONE", []),
-    ("ACUTE", [(-2, 0), (2, 4)]),
-    ("GRAVE", [(-2, 4), (2, 0)]),
-    ("CIRCUMFLEX", [(-3, 0), (0, 4), (3, 0)]),
-    ("DIAERESIS", [(-3, 1), (-3, 4), PEN_UP, (3, 1), (3, 4)]),
-    ("TILDE", [(-4, 1), (-2, 4), (0, 2), (2, 0), (4, 3)]),
-    ("RING", [(0, 0), (-2, 2), (0, 4), (2, 2), (0, 0)]),
-    ("CEDILLA", [(0, 0), (0, -2), (-3, -4)]),  # below the baseline, not above
-    ("SLASH", []),                             # a bar through the letter (ø)
+    ("NONE", [], False),
+    ("ACUTE", [(-2, 0), (2, 4)], False),
+    ("GRAVE", [(-2, 4), (2, 0)], False),
+    ("CIRCUMFLEX", [(-3, 0), (0, 4), (3, 0)], False),
+    ("DIAERESIS", [(-3, 1), (-3, 4), PEN_UP, (3, 1), (3, 4)], False),
+    ("TILDE", [(-4, 1), (-2, 4), (0, 2), (2, 0), (4, 3)], False),
+    ("RING", [(0, 0), (-2, 2), (0, 4), (2, 2), (0, 0)], False),
+    ("CEDILLA", [(0, 0), (0, -2), (-3, -4)], True),
+    ("SLASH", [], False),  # a bar through the letter (ø); the renderer draws it
+    # The Slavic and Baltic accents, and the Hungarian one.
+    ("CARON", [(-3, 4), (0, 0), (3, 4)], False),          # c|caron| s|caron| z|caron|
+    ("BREVE", [(-3, 4), (-2, 1), (0, 0), (2, 1), (3, 4)], False),  # a|breve| g|breve|
+    ("DOUBLE_ACUTE", [(-4, 0), (-1, 4), PEN_UP, (1, 0), (4, 4)], False),  # o|dblac|
+    ("MACRON", [(-3, 2), (3, 2)], False),                 # a|macron| e|macron|
+    ("DOT_ABOVE", [(0, 1), (0, 3)], False),               # e|dot| z|dot| I|dot|
+    ("OGONEK", [(0, 0), (2, -1), (2, -3), (0, -4)], True),      # a|ogonek| e|ogonek|
+    ("COMMA_BELOW", [(0, -1), (-1, -3)], True),           # s|comma| t|comma|
 ]
-ACCENT_ID = {name: i for i, (name, _) in enumerate(ACCENTS)}
+ACCENT_ID = {name: i for i, (name, _, _) in enumerate(ACCENTS)}
 
 # A letter plus an accent. All of Latin-1's, the two the six languages need
 # from beyond it, and the Cyrillic Ё nobody but Russian asks for.
@@ -168,6 +313,79 @@ COMPOSED = {
     0x00FD: ("y", "ACUTE"),  0x00FF: ("y", "DIAERESIS"),
     0x0401: ("Е", "DIAERESIS"),  # Ё, over the Cyrillic Е
     0x0451: ("е", "DIAERESIS"),  # ё
+    0x0407: ("І", "DIAERESIS"),  # Ї, over the Ukrainian І
+    0x0457: ("і", "DIAERESIS"),  # ї
+
+    # --- Caron: Czech, Slovak, Slovenian, Croatian, Serbian, the Baltics
+    0x010C: ("C", "CARON"), 0x010D: ("c", "CARON"),
+    0x010E: ("D", "CARON"), 0x010F: ("d", "CARON"),
+    0x011A: ("E", "CARON"), 0x011B: ("e", "CARON"),
+    0x013D: ("L", "CARON"), 0x013E: ("l", "CARON"),
+    0x0147: ("N", "CARON"), 0x0148: ("n", "CARON"),
+    0x0158: ("R", "CARON"), 0x0159: ("r", "CARON"),
+    0x0160: ("S", "CARON"), 0x0161: ("s", "CARON"),
+    0x0164: ("T", "CARON"), 0x0165: ("t", "CARON"),
+    0x017D: ("Z", "CARON"), 0x017E: ("z", "CARON"),
+
+    # --- Acute on consonants: Polish, Croatian, Serbian -----------------
+    0x0106: ("C", "ACUTE"), 0x0107: ("c", "ACUTE"),
+    0x0143: ("N", "ACUTE"), 0x0144: ("n", "ACUTE"),
+    0x015A: ("S", "ACUTE"), 0x015B: ("s", "ACUTE"),
+    0x0179: ("Z", "ACUTE"), 0x017A: ("z", "ACUTE"),
+    0x0139: ("L", "ACUTE"), 0x013A: ("l", "ACUTE"),
+    0x0154: ("R", "ACUTE"), 0x0155: ("r", "ACUTE"),
+
+    # --- Ogonek: Polish, Lithuanian -------------------------------------
+    0x0104: ("A", "OGONEK"), 0x0105: ("a", "OGONEK"),
+    0x0118: ("E", "OGONEK"), 0x0119: ("e", "OGONEK"),
+    0x012E: ("I", "OGONEK"), 0x012F: ("i", "OGONEK"),
+    0x0172: ("U", "OGONEK"), 0x0173: ("u", "OGONEK"),
+
+    # --- Dot above: Polish |z|, Lithuanian |e|, the Turkish capital I ---
+    0x017B: ("Z", "DOT_ABOVE"), 0x017C: ("z", "DOT_ABOVE"),
+    0x0116: ("E", "DOT_ABOVE"), 0x0117: ("e", "DOT_ABOVE"),
+    0x0130: ("I", "DOT_ABOVE"),
+
+    # --- Macron: Latvian -------------------------------------------------
+    0x0100: ("A", "MACRON"), 0x0101: ("a", "MACRON"),
+    0x0112: ("E", "MACRON"), 0x0113: ("e", "MACRON"),
+    0x012A: ("I", "MACRON"), 0x012B: ("i", "MACRON"),
+    0x016A: ("U", "MACRON"), 0x016B: ("u", "MACRON"),
+
+    # --- Comma below: Romanian, Latvian ---------------------------------
+    0x0218: ("S", "COMMA_BELOW"), 0x0219: ("s", "COMMA_BELOW"),
+    0x021A: ("T", "COMMA_BELOW"), 0x021B: ("t", "COMMA_BELOW"),
+    0x0122: ("G", "COMMA_BELOW"), 0x0123: ("g", "COMMA_BELOW"),
+    0x0136: ("K", "COMMA_BELOW"), 0x0137: ("k", "COMMA_BELOW"),
+    0x013B: ("L", "COMMA_BELOW"), 0x013C: ("l", "COMMA_BELOW"),
+    0x0145: ("N", "COMMA_BELOW"), 0x0146: ("n", "COMMA_BELOW"),
+
+    # --- Breve: Romanian, Turkish ---------------------------------------
+    0x0102: ("A", "BREVE"), 0x0103: ("a", "BREVE"),
+    0x011E: ("G", "BREVE"), 0x011F: ("g", "BREVE"),
+
+    # --- Double acute: Hungarian ----------------------------------------
+    0x0150: ("O", "DOUBLE_ACUTE"), 0x0151: ("o", "DOUBLE_ACUTE"),
+    0x0170: ("U", "DOUBLE_ACUTE"), 0x0171: ("u", "DOUBLE_ACUTE"),
+
+    # --- Ring above: Czech ----------------------------------------------
+    0x016E: ("U", "RING"), 0x016F: ("u", "RING"),
+
+    # --- Cedilla on the Turkish s ---------------------------------------
+    0x015E: ("S", "CEDILLA"), 0x015F: ("s", "CEDILLA"),
+
+    # --- Greek's accented vowels ----------------------------------------
+    0x0386: ("Α", "ACUTE"), 0x03AC: ("α", "ACUTE"),
+    0x0388: ("Ε", "ACUTE"), 0x03AD: ("ε", "ACUTE"),
+    0x0389: ("Η", "ACUTE"), 0x03AE: ("η", "ACUTE"),
+    0x038A: ("Ι", "ACUTE"), 0x03AF: ("ι", "ACUTE"),
+    0x038C: ("Ο", "ACUTE"), 0x03CC: ("ο", "ACUTE"),
+    0x038E: ("Υ", "ACUTE"), 0x03CD: ("υ", "ACUTE"),
+    0x038F: ("Ω", "ACUTE"), 0x03CE: ("ω", "ACUTE"),
+    0x03AA: ("Ι", "DIAERESIS"), 0x03CA: ("ι", "DIAERESIS"),
+    0x03AB: ("Υ", "DIAERESIS"), 0x03CB: ("υ", "DIAERESIS"),
+    0x0390: ("ι", "ACUTE"),  # |iota| with both marks: the acute is the one
+    0x03B0: ("υ", "ACUTE"),  # that carries the meaning at this size
 }
 
 # Characters that are not letters and have an ASCII twin, or nothing to draw
@@ -275,6 +493,18 @@ def build_glyphs(db):
         out[ord(ch)] = db[2801 + i]
     for i, ch in enumerate(CYRILLIC_LOWER):
         out[ord(ch)] = db[2901 + i]
+    for i, ch in enumerate(GREEK):
+        out[ord(ch)] = db[527 + i]
+    for i, ch in enumerate(GREEK_LOWER):
+        out[ord(ch)] = db[627 + i]
+    for cp, num in MIRRORED.items():
+        adv, pts = db[num]
+        out[cp] = (adv, [PEN_UP if p == PEN_UP else (adv - p[0], p[1]) for p in pts])
+    for cp, num in ROTATED.items():
+        adv, pts = db[num]
+        # Turned upside down about the x-height band, which is where an
+        # inverted Spanish mark sits: head down, tail up.
+        out[cp] = (adv, [PEN_UP if p == PEN_UP else (adv - p[0], 14 - p[1]) for p in pts])
     for cp, num in ALIASES.items():
         out[cp] = db[num]
     for key, val in HAND_DRAWN.items():
@@ -338,8 +568,8 @@ def build():
         pool.extend(pts)
 
     acc_pool, acc_entries = [], []
-    for name, pts in ACCENTS:
-        acc_entries.append((name, len(acc_pool), len(pts)))
+    for name, pts, below in ACCENTS:
+        acc_entries.append((name, len(acc_pool), len(pts), below))
         acc_pool.extend(pts)
 
     for _, adv, off, n in entries:
@@ -448,7 +678,7 @@ def main():
                                              "+%d letters" % len(letters)))
 
     out.append("\n// --- Accents ----------------------------------------------------------------\n")
-    for i, (name, off, n) in enumerate(acc_entries):
+    for i, (name, off, n, _below) in enumerate(acc_entries):
         out.append("#define SE_ACCENT_%-12s %d" % (name, i))
     out.append("#define SE_ACCENT_COUNT      %d\n" % len(acc_entries))
     out.append("// Accent strokes: x from the MIDDLE of the letter, y up from where the")
@@ -456,8 +686,10 @@ def main():
     out.append("static int8_t const SE_HERSHEY_ACCENT_PTS[] = {")
     out.append(fmt_pts(acc_pool, "    "))
     out.append("};")
-    out.append("static struct { uint16_t off, n; } const SE_HERSHEY_ACCENT[SE_ACCENT_COUNT] = {")
-    out.append("    " + " ".join("{%d,%d}," % (off, n) for _, off, n in acc_entries))
+    out.append("// off/n into the strokes above, and whether it hangs BELOW the baseline.")
+    out.append("static struct { uint16_t off, n; uint8_t below; } const SE_HERSHEY_ACCENT[SE_ACCENT_COUNT] = {")
+    out.append("    " + " ".join("{%d,%d,%d}," % (off, n, 1 if below else 0)
+                                 for _, off, n, below in acc_entries))
     out.append("};\n")
 
     out.append("// --- Whole glyphs -----------------------------------------------------------\n")

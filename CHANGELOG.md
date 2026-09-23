@@ -50,6 +50,15 @@ refuses to run unless the ASCII it regenerates matches the committed table and
 every letter of every alphabet it lists has a glyph, so support is per language
 rather than per string. `tools/hershey/README.md` says how to add one.
 
+The alphabets covered are the 32 CraftMiner ships: every language written in
+Latin, Greek or Cyrillic that Europe uses, Turkish included. That needed
+sixteen accents (the usual five, plus caron, breve, double acute, macron, dot
+above, ogonek and comma below), Greek from Hershey's greek SIMPLEX face --
+the same weight as the Latin, unlike the Cyrillic, which he only drew in
+complex -- and a dozen letterforms nobody can compose: Ł, þ, ð, đ, ı, Є, Ґ,
+Џ, Ћ, Ђ and the Serbian Љ and Њ, which are ligatures joined on their shared
+upright.
+
 Costs: about 5 KB of rodata for the new tables, and per character a bisection
 over 83 entries only when the codepoint is not ASCII. ASCII takes one compare
 and an index, as it always did.

@@ -26,7 +26,8 @@
 #include "hershey_ext.h"
 
 // The cap line and the x-height, in font units. Hershey's capitals reach
-// 21 and his lowercase 14; the accents sit just clear of each.
+// 21 and his lowercase 14; the accents sit just clear of each, except
+// those the table marks as hanging below the baseline.
 #define HERSHEY_CAP_H  21
 #define HERSHEY_X_H    14
 
@@ -155,8 +156,9 @@ static inline bool hershey_glyph(uint32_t cp, hershey_glyph_t* g) {
         // in it: the cap line for a capital, the x-height for the rest --
         // except `i` and `j`, whose dot is already up there.
         g->accent_x            = (int8_t)(g->adv / 2);
-        bool const is_capital  = (base >= 'A' && base <= 'Z') ||      // Latin
-                                 (base >= 0x0410 && base <= 0x042F);  // Cyrillic
+        bool const is_capital  = (base >= 'A' && base <= 'Z') ||       // Latin
+                                 (base >= 0x0391 && base <= 0x03A9) ||  // Greek
+                                 (base >= 0x0410 && base <= 0x042F);    // Cyrillic
         if (is_capital) {
             g->accent_y = HERSHEY_CAP_H + 2;
         } else if (base == 'i' || base == 'j') {
@@ -164,8 +166,8 @@ static inline bool hershey_glyph(uint32_t cp, hershey_glyph_t* g) {
         } else {
             g->accent_y = HERSHEY_X_H + 2;
         }
-        if (g->accent == SE_ACCENT_CEDILLA) {
-            g->accent_y = 0;  // it hangs off the bottom instead
+        if (SE_HERSHEY_ACCENT[g->accent].below) {
+            g->accent_y = 0;  // a cedilla, an ogonek, a comma: below instead
         }
         return true;
     }
