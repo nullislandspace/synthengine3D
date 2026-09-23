@@ -17,6 +17,31 @@ release.
 
 Additive only: a 2.0 game builds unchanged.
 
+### Changed — text is UTF-8, and the font has more than ASCII (2026-09-23)
+
+`rendertext_draw` and `rendertext_size` (`se_text.h`) read their strings as
+UTF-8 instead of one byte per glyph, and draw what they find: ASCII from
+`simplex` as before, plus Cyrillic, accented Latin, the European quotation
+marks, both dashes and the ellipsis. A codepoint the font cannot draw comes out
+as an empty box rather than disappearing, and one malformed byte costs one
+character, never the rest of the string.
+
+An ASCII-only game is unaffected — every byte below 0x80 draws exactly the
+glyph, at exactly the advance, that it drew before, and `simplex` itself is
+untouched and still public. A game that was passing Latin-1 bytes (where 0xE4
+drew nothing and took 16 units of space) now gets one box per invalid byte;
+such a string was already not saying what it meant.
+
+The new glyphs are generated from Hershey's own database, vendored at
+`tools/hershey/hershey.dat` with the script that reads it. The generator
+refuses to run unless the ASCII it regenerates matches the committed table and
+every letter of every alphabet it lists has a glyph, so support is per language
+rather than per string. `tools/hershey/README.md` says how to add one.
+
+Costs: about 5 KB of rodata for the new tables, and per character a bisection
+over 83 entries only when the codepoint is not ASCII. ASCII takes one compare
+and an index, as it always did.
+
 ### Added — a quarter-resolution depth plane in internal SRAM (2026-09-22)
 
 `SE_SCENE_DEPTH16_INTERNAL` (`se_config.h`, default 0). When a game sets it,

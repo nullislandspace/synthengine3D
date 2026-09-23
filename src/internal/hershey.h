@@ -1,3 +1,8 @@
+// Hershey roman simplex, ASCII 32..126. Public as `simplex` (se_text.h).
+// Regenerated from tools/hershey/hershey.dat; see tools/hershey/README.md.
+#ifndef HERSHEY_H
+#define HERSHEY_H
+
 int simplex[95][112] = {
     {0,16, /* Ascii 32 */
    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -570,3 +575,5 @@ int simplex[95][112] = {
    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}
 };
+
+#endif // HERSHEY_H

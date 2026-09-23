@@ -6,6 +6,12 @@
 //  inline stroke helpers are engine-internal (src/internal/hershey*.h);
 //  this header is the stable surface games draw text through. Part of
 //  the versioned public API (see se_version.h).
+//
+//  STRINGS ARE UTF-8. Besides ASCII the font draws Cyrillic, accented
+//  Latin, the European quotation marks, both dashes and the ellipsis;
+//  a codepoint it cannot draw comes out as an empty box, so a missing
+//  letter is visible rather than silently dropped. Which alphabets are
+//  covered, and how to add one, is tools/hershey/README.md.
 // =====================================================================
 
 #include "pax_gfx.h"
