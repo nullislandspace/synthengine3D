@@ -17,6 +17,18 @@ release.
 
 Additive only: a 2.0 game builds unchanged.
 
+### Added — radio rows in the menu (2026-09-23)
+
+`SE_MENU_VAL_RADIO` (`se_ui.h`), appended to `se_menu_val_t`, for a list where
+exactly one row is chosen: the engine draws a ring at the value column, filled
+on the row whose `checked` is set. A check box says a setting is on or off by
+itself; a radio says this row is the one in force and picking another drops
+it, and drawing one as the other misleads the player about what the list does.
+
+Reuses the existing `checked` field, so `se_menu_row_t` is unchanged; a game
+that does not use the new kind is unaffected. The dot's size is
+`SE_UI_RADIO_R` (`se_config.h`, 0.26 of the row text height).
+
 ### Changed — text is UTF-8, and the font has more than ASCII (2026-09-23)
 
 `rendertext_draw` and `rendertext_size` (`se_text.h`) read their strings as

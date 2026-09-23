@@ -214,6 +214,11 @@
 // Geometry of a SE_MENU_VAL_RANGE slider (drawn in the value column,
 // centred vertically on the row text caps). The "NN%" readout sits to
 // its right. Override per game to resize the bar.
+// Radio dot radius, as a fraction of the row text height.
+#ifndef SE_UI_RADIO_R
+#define SE_UI_RADIO_R         0.26f
+#endif
+
 #ifndef SE_UI_BAR_W
 #define SE_UI_BAR_W           180.0f  // slider track width  (px)
 #endif

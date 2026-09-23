@@ -49,6 +49,50 @@ static void outline_rect_565(uint16_t* px, int x, int y, int w, int h, uint16_t 
     direct_565_line(px, x + w - 1, y,         x + w - 1, y + h - 1, packed);
 }
 
+// A circle outline, and a filled one, by the midpoint algorithm at a
+// size where a rasterised circle still reads as round (about 14 px).
+static void circle_565(uint16_t* px, int cx, int cy, int r, uint16_t packed, bool fill) {
+    int x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+        if (fill) {
+            direct_565_line(px, cx - x, cy + y, cx + x, cy + y, packed);
+            direct_565_line(px, cx - x, cy - y, cx + x, cy - y, packed);
+            direct_565_line(px, cx - y, cy + x, cx + y, cy + x, packed);
+            direct_565_line(px, cx - y, cy - x, cx + y, cy - x, packed);
+        } else {
+            direct_565_set_pixel(px, cx + x, cy + y, packed);
+            direct_565_set_pixel(px, cx - x, cy + y, packed);
+            direct_565_set_pixel(px, cx + x, cy - y, packed);
+            direct_565_set_pixel(px, cx - x, cy - y, packed);
+            direct_565_set_pixel(px, cx + y, cy + x, packed);
+            direct_565_set_pixel(px, cx - y, cy + x, packed);
+            direct_565_set_pixel(px, cx + y, cy - x, packed);
+            direct_565_set_pixel(px, cx - y, cy - x, packed);
+        }
+        y++;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            x--;
+            err += 2 * (y - x) + 1;
+        }
+    }
+}
+
+// Draw a SE_MENU_VAL_RADIO dot: a ring, filled in the middle when this
+// is the chosen row. `x` is the value column's left edge, `ry` the row's
+// text top, `th` the row text height. Centred on the text caps, so it
+// sits on the same line as a "[X]" would.
+static void draw_radio(pax_buf_t* fb, float x, float ry, float th, pax_col_t col, bool on) {
+    uint16_t* const out    = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t  const packed = direct_565_pack_for(fb, col);
+    int const       r      = (int)(th * SE_UI_RADIO_R);
+    int const       cx     = (int)x + r + 1;
+    int const       cy     = (int)(ry + th * 0.5f);
+    circle_565(out, cx, cy, r, packed, false);
+    if (on) circle_565(out, cx, cy, r - 3 > 1 ? r - 3 : 1, packed, true);
+}
+
 // Draw a SE_MENU_VAL_RANGE slider: an outlined track filled to `pct`%,
 // then the "NN%" readout to its right. `x` is the value column's left
 // edge, `ry` the row's text top, `th` the row text height, `col` the
@@ -203,6 +247,9 @@ void se_menu_draw(se_menu_t const* menu, pax_buf_t* fb) {
                 break;
             case SE_MENU_VAL_RANGE:
                 draw_range(fb, value_x, ry, SE_UI_ROW_TEXT_H, col, r->range_pct);
+                break;
+            case SE_MENU_VAL_RADIO:
+                draw_radio(fb, value_x, ry, SE_UI_ROW_TEXT_H, col, r->checked);
                 break;
             case SE_MENU_VAL_NONE:
             default:

@@ -34,6 +34,7 @@ typedef enum {
     SE_MENU_VAL_TEXT,       // label + a free value string
     SE_MENU_VAL_CUSTOM,     // label + game-drawn value (see draw_value)
     SE_MENU_VAL_RANGE,      // label + a 0..100 slider bar + "NN%" (see range_pct)
+    SE_MENU_VAL_RADIO,      // label + a radio dot (see checked)
 } se_menu_val_t;
 
 // Draws the value column of a SE_MENU_VAL_CUSTOM row. (x, y) is the value
@@ -44,10 +45,14 @@ typedef enum {
 typedef void (*se_menu_draw_value_fn)(pax_buf_t* fb, float x, float y,
                                       float h, pax_col_t col, void* ctx);
 
+// CHECK is for a setting that is on or off by itself; RADIO is for one
+// row of a list where exactly one row is chosen and choosing another
+// unchooses this one. They are different questions and they look
+// different: a box you tick, a dot you fill. Both read `checked`.
 typedef struct {
     char const*           label;
     se_menu_val_t         kind;
-    bool                  checked;     // SE_MENU_VAL_CHECK
+    bool                  checked;     // SE_MENU_VAL_CHECK, SE_MENU_VAL_RADIO
     char const*           value;       // SE_MENU_VAL_TEXT
     int                   range_pct;   // SE_MENU_VAL_RANGE  (clamped 0..100)
     se_menu_draw_value_fn draw_value;  // SE_MENU_VAL_CUSTOM

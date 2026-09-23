@@ -12,8 +12,8 @@ drawing. The game owns what each row *is* (its data) and what activating it
 ```c
 typedef struct {
     char const*           label;
-    se_menu_val_t         kind;       // NONE / CHECK / TEXT / CUSTOM / RANGE
-    bool                  checked;    // CHECK:  [X] / [ ]
+    se_menu_val_t         kind;       // NONE / CHECK / TEXT / CUSTOM / RANGE / RADIO
+    bool                  checked;    // CHECK:  [X] / [ ]   RADIO: the dot
     char const*           value;      // TEXT:   free value string
     int                   range_pct;  // RANGE:  0..100 slider
     se_menu_draw_value_fn draw_value; // CUSTOM: game draws the value column
@@ -61,6 +61,12 @@ The engine **owns no values** — it reports *which row + which direction*; the
 game maps that onto whatever the row controls (mirrors how ACTIVATE works).
 That keeps the menu reusable: a brightness slider, a volume slider and a
 checkbox all go through the same renderer; the game decides what each does.
+
+**CHECK or RADIO** is a question of what the row means, not of taste. A check
+box is a setting that is on or off by itself; a radio is one row of a list
+where exactly one is chosen and choosing another unchooses this one. Give the
+rows of a single-choice list `SE_MENU_VAL_RADIO` and set `checked` on the one
+in force -- the engine draws a ring, filled on that row.
 
 A **CUSTOM** row draws its own value column via `draw_value(fb, x, y, h, col,
 ctx)` — e.g. rendering a bound key as a keycap icon while the engine draws the
