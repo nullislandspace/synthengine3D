@@ -13,6 +13,51 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
+## [2.2] — 2026-09-23
+
+Additive only: a 2.1 game builds unchanged.
+
+### Added — per-class volume, and a way to keep the speaker awake
+
+`se_audio.h` gains three calls:
+
+```c
+void audio_mixer_set_music_volume(uint8_t percent);         // 0..100
+void audio_mixer_set_group_volume(uint8_t group, uint8_t percent);
+void audio_mixer_keep_awake(bool on);
+```
+
+The two volumes are what a game puts behind a slider. They scale each
+class on top of the compile-time balance in `se_config.h`, so the
+existing `AUDIO_MUSIC_GAIN` / `AUDIO_SFX_GAIN` still set the default
+mix and the player adjusts from there. Both start at 100. They are
+**not** the device volume, which belongs to the launcher.
+
+Note that a volume of 0 is not the same as gating a class off: a silent
+source still counts as something playing, and so still holds the
+speaker up. Use `_set_music_enabled` / `_set_group_enabled` for off.
+
+`audio_mixer_keep_awake()` exists because the idle policy had a sharp
+edge that cost a game real time to find. The mixer mutes the amplifier
+and disables I2S a few tens of milliseconds after the last sound, and
+powers back up when the next voice is registered — correct, and
+invisible, until the sounds are SHORT. An amplifier's turn-on is not
+instantaneous, so a 35 ms click registered against a cold amp is over
+before the speaker is listening. The audio is mixed and written
+perfectly and is simply never heard.
+
+CraftMiner met this as "the tool sounds only play when the music is
+on", which is exactly what it looks like from the outside: a game with
+a music source installed keeps the mixer busy every chunk (a source
+rendering silence still counts as active), so the amplifier never
+sleeps and the effects are fine — until the player turns the music off.
+
+With `keep_awake(true)` the mixer feeds silence rather than powering
+down, and every one-shot is heard from its first sample. The cost is
+the amplifier's idle draw, so a game turns it on while it is being
+played. A game that installs a music source and leaves it there has
+been paying that cost all along.
+
 ## [2.1] — 2026-09-20 (unreleased, still being worked on)
 
 Additive only: a 2.0 game builds unchanged.

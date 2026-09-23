@@ -47,6 +47,17 @@ static volatile bool g_music_gate = true;
 static volatile bool g_group_gate[SE_AUDIO_SFX_GROUP_COUNT] =
     { [0 ... SE_AUDIO_SFX_GROUP_COUNT - 1] = true };   // groups default enabled
 
+// How loud each class is mixed in: the player's sliders, as Q15
+// multipliers on top of the compile-time balance above. 32768 is 100%,
+// which is what they all start at.
+static volatile int32_t g_music_vol_q15 = 32768;
+static volatile int32_t g_group_vol_q15[SE_AUDIO_SFX_GROUP_COUNT] =
+    { [0 ... SE_AUDIO_SFX_GROUP_COUNT - 1] = 32768 };
+
+// Keep the amplifier powered through the quiet, so a short one-shot is
+// not lost to its turn-on (se_audio.h, audio_mixer_keep_awake).
+static volatile bool g_keep_awake = false;
+
 // Number of consecutive silent chunks the mixer pushes through the
 // I2S DMA queue before powering down. ~46 ms covers the worst case
 // of DMA queue + codec latency without chopping the tail off a
@@ -175,7 +186,8 @@ static void mixer_task_fn(void* arg) {
             memset(g_mix_music, 0, sizeof(g_mix_music));
             music->render(music, g_mix_music, MIXER_CHUNK_FRAMES);
             for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
-                g_accum[j] += ((int32_t)g_mix_music[j] * MIXER_MUSIC_GAIN_Q15) >> 15;
+                g_accum[j] +=
+                    ((((int32_t)g_mix_music[j] * MIXER_MUSIC_GAIN_Q15) >> 15) * g_music_vol_q15) >> 15;
             }
             active_sources++;
         }
@@ -195,14 +207,15 @@ static void mixer_task_fn(void* arg) {
             sfx_voice_t* v = g_voices[i].voice;
             if (v == NULL || v->finished || v->render == NULL) continue;
 
-            bool const allowed = (v->group < SE_AUDIO_SFX_GROUP_COUNT)
-                                     ? g_group_gate[v->group] : true;
+            bool const in_range = v->group < SE_AUDIO_SFX_GROUP_COUNT;
+            bool const allowed  = in_range ? g_group_gate[v->group] : true;
             if (!allowed) continue;
+            int32_t const vol = in_range ? g_group_vol_q15[v->group] : 32768;
 
             memset(g_mix_voice, 0, sizeof(g_mix_voice));
             v->render(v, g_mix_voice, MIXER_CHUNK_FRAMES);
             for (size_t j = 0; j < MIXER_CHUNK_SAMPLES; j++) {
-                g_accum[j] += ((int32_t)g_mix_voice[j] * MIXER_SFX_GAIN_Q15) >> 15;
+                g_accum[j] += ((((int32_t)g_mix_voice[j] * MIXER_SFX_GAIN_Q15) >> 15) * vol) >> 15;
             }
             active_sources++;
         }
@@ -213,6 +226,18 @@ static void mixer_task_fn(void* arg) {
 
         // ---- Idle handling ----
         if (active_sources == 0) {
+            // Held awake: keep the amplifier powered and the DMA fed with
+            // silence, so the next one-shot is heard from its first
+            // sample instead of arriving before the speaker does
+            // (se_audio.h, audio_mixer_keep_awake).
+            if (g_keep_awake) {
+                if (!g_powered_on) power_up();
+                memset(g_out, 0, sizeof(g_out));
+                size_t written = 0;
+                i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
+                silence_chunks = 0;
+                continue;
+            }
             if (!g_powered_on) {
                 ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
                 continue;
@@ -463,6 +488,27 @@ void audio_mixer_stop_all_voices(void) {
 // Safe to call before audio_mixer_init() — they only set a flag the
 // mixer task reads once running.
 void audio_mixer_set_music_enabled(bool on) { g_music_gate = on; }
+
+static int32_t pct_q15(uint8_t percent) {
+    if (percent > 100) percent = 100;
+    return ((int32_t)percent * 32768) / 100;
+}
+
+void audio_mixer_set_music_volume(uint8_t percent) {
+    g_music_vol_q15 = pct_q15(percent);
+}
+
+void audio_mixer_set_group_volume(uint8_t group, uint8_t percent) {
+    if (group < SE_AUDIO_SFX_GROUP_COUNT) g_group_vol_q15[group] = pct_q15(percent);
+}
+
+void audio_mixer_keep_awake(bool on) {
+    g_keep_awake = on;
+    // Turning it ON has to poke the task: it may already be blocked in
+    // ulTaskNotifyTake with the amplifier down, and nothing else is
+    // going to wake it.
+    if (on && g_mixer_task != NULL) xTaskNotifyGive(g_mixer_task);
+}
 
 void audio_mixer_set_group_enabled(uint8_t group, bool on) {
     if (group < SE_AUDIO_SFX_GROUP_COUNT) g_group_gate[group] = on;

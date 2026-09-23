@@ -74,3 +74,35 @@ void audio_mixer_stop_all_voices(void);
 // All gates default to enabled. Safe to call before audio_mixer_init().
 void audio_mixer_set_music_enabled(bool on);
 void audio_mixer_set_group_enabled(uint8_t group, bool on);
+
+// How loud each class is mixed in, 0..100 percent, on top of the
+// compile-time balance in se_config.h (AUDIO_MUSIC_GAIN /
+// AUDIO_SFX_GAIN). This is the knob a game puts in front of the player
+// as a slider; the device's own volume control is a separate thing
+// entirely and belongs to the launcher. 100 is unchanged, 0 is silent
+// -- but note that 0 is NOT the same as gating the class off, because a
+// silent source still counts as something playing. Use the _enabled
+// gates for off. Values above 100 are clamped. Safe to call before
+// audio_mixer_init(); both default to 100.
+void audio_mixer_set_music_volume(uint8_t percent);
+void audio_mixer_set_group_volume(uint8_t group, uint8_t percent);
+
+// Hold the speaker powered even when nothing is playing.
+//
+// WHY A GAME WANTS THIS. The mixer's idle policy mutes the amplifier
+// and disables the I2S channel a few tens of milliseconds after the
+// last sound, and brings them back when the next one is registered.
+// That is right for a game that makes a noise occasionally, and wrong
+// for one whose sounds are SHORT: the amplifier's turn-on is not
+// instantaneous, so a 35 ms click registered against a cold amp is
+// over before the speaker is listening. The sound is mixed and written
+// correctly and simply never heard, which is a hard thing to debug
+// from the outside.
+//
+// With this on, the mixer keeps feeding silence instead of powering
+// down, so every one-shot is heard in full. The cost is the
+// amplifier's idle draw, so a game should turn it on while it is being
+// played and off when it is not. A game that installs a music source
+// and leaves it there has been paying this cost already, whether or not
+// it knew: a source that renders silence still counts as active.
+void audio_mixer_keep_awake(bool on);
