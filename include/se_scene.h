@@ -50,46 +50,21 @@
 
 // Which algorithm scene_render() uses to resolve the frame. Selected per
 // call, so a game can switch renderers live (between frames) or pick a
-// different one per screen. Both built-ins consume the SAME submitted
-// geometry and produce the SAME image -- they differ only in loop order
-// and therefore in what they cost:
+// different one per screen.
 //
-//   SE_RENDER_ZBUFFER  primitive-driven. Walks triangles, and for each
-//                      one walks the pixels it covers, depth-testing per
+//   SE_RENDER_ZBUFFER  the built-in. Walks triangles, and for each one
+//                      walks the pixels it covers, depth-testing per
 //                      pixel. Cost scales with the summed triangle AREA,
 //                      i.e. covered pixels x overdraw: a pixel under N
 //                      overlapping triangles is visited N times.
 //
-//   SE_RENDER_RAYCAST  pixel-driven. Bins triangles into screen tiles,
-//                      then for each pixel of a non-empty tile casts one
-//                      primary ray, keeps the nearest hit, and writes the
-//                      pixel ONCE. Cost is independent of overdraw, but it
-//                      pays edge tests on every pixel of a non-empty tile,
-//                      including ones the ray misses.
-//
-// Neither is universally faster -- the crossover depends on the scene's
-// overdraw and how tightly its geometry packs into tiles, so a game (or a
-// different game reusing the engine) should measure both with
-// scene_raster_stats(). SE_RENDER_DEFAULT is the safe general choice.
-//
-// Why the two agree pixel-for-pixel: for PRIMARY rays through a pinhole
-// camera, "the ray through pixel p hits triangle T first" is exactly "p is
-// inside T's projection and T holds the largest 1/z there" -- which is what
-// the depth test computes. So the raycaster is a reordering of the same
-// visible-surface problem, not a different one, and it needs no world-space
-// geometry: it casts against the projected (sx, sy, w) triangles. A ray that
-// hits nothing writes no pixel, so whatever the game already painted (a
-// backdrop, a PPA composite) shows through untouched -- identical to the
-// rasterizer, which only touches covered pixels.
-//
-// Values above SE_RENDER_BUILTIN_COUNT are handles returned by
+// Values from SE_RENDER_BUILTIN_COUNT up are handles returned by
 // se_renderer_register() (see below).
 typedef enum {
     SE_RENDER_ZBUFFER = 0,           // per-pixel reciprocal-z depth test
-    SE_RENDER_RAYCAST = 1,           // tiled primary-ray cast, zero overdraw
     SE_RENDER_DEFAULT = SE_RENDER_ZBUFFER,
-    SE_RENDER_BUILTIN_COUNT = 2,     // first handle se_renderer_register() hands out
-    SE_RENDER_MAX = 8,               // renderer table size (built-ins + custom)
+    SE_RENDER_BUILTIN_COUNT = 1,     // first handle se_renderer_register() hands out
+    SE_RENDER_MAX = 8,               // renderer table size (built-in + custom)
 } se_render_mode_t;
 
 // Allocate the depth buffer, frame-stamp plane and the deferred triangle
@@ -119,8 +94,7 @@ void scene_begin(pax_buf_t* fb);
 // format and orientation (e.g. an se_ppa_layer_t allocated that size),
 // which the game scales up onto the screen afterwards
 // (se_ppa_blit_scaled). Lines and points stay one target pixel wide, so
-// two screen pixels. The raycast renderer falls back to the z-buffer at
-// quarter resolution. Switch freely between frames: the scale is
+// two screen pixels. Switch freely between frames: the scale is
 // latched by scene_begin(). 1 (the default) is full resolution; any
 // other value than 2 means 1.
 void scene_set_render_scale(int div);
@@ -417,8 +391,8 @@ se_scene_options_t scene_get_options(void);
 
 // --- Pluggable renderers ---------------------------------------------
 //
-// The two built-ins are just the two renderers the engine ships with;
-// the pipeline itself is a seam. A game can register its own renderer
+// The z-buffer is just the renderer the engine ships with; the pipeline
+// itself is a seam. A game can register its own renderer
 // and select it exactly like a built-in, which is the point of the
 // engine being reusable: a different game with different geometry (or a
 // different visual style -- cel shading, dithering, a depth-cued fog
@@ -545,12 +519,12 @@ se_geometry_t se_scene_geometry(void);
 // path, for a custom renderer that has no texturing of its own. Call it
 // from the renderer's rasterize() AFTER the flat triangles have written
 // their depth and BEFORE the edges, which is the order the built-in
-// renderers use. It depth-tests against, and writes, the shared depth
+// renderer uses. It depth-tests against, and writes, the shared depth
 // plane, so it composes with whatever the renderer drew.
 void se_scene_raster_textured(void);
 
 // Draw this frame's points with the engine's own point pass, for a custom
 // renderer. Call it from rasterize() last, after the edges, as the
-// built-in renderers do. It depth-tests against the shared depth plane
+// built-in renderer does. It depth-tests against the shared depth plane
 // but never writes it.
 void se_scene_raster_points(void);

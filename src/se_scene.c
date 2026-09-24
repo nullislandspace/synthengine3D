@@ -1518,7 +1518,7 @@ static void scene_order_pass(void) {
 }
 
 // =====================================================================
-//  Built-in renderer #1 -- SE_RENDER_ZBUFFER (primitive-driven)
+//  The built-in renderer -- SE_RENDER_ZBUFFER (primitive-driven)
 // ---------------------------------------------------------------------
 //  The original pipeline, unchanged: walk the triangles in list order and
 //  scan-convert each one, depth-testing per covered pixel. Cost scales
@@ -1556,298 +1556,11 @@ static void zbuf_rasterize(void* user) {
 }
 
 // =====================================================================
-//  Built-in renderer #2 -- SE_RENDER_RAYCAST (pixel-driven)
-// ---------------------------------------------------------------------
-//  One primary ray per pixel, nearest hit wins, each pixel written at
-//  most once. A ray that hits nothing writes NOTHING -- not the colour
-//  and not the depth -- so the backdrop under it survives untouched,
-//  exactly like the rasterizer, which only ever touches covered pixels.
-//
-//  Casting a ray per pixel against every triangle would be O(pixels x
-//  tris) and hopeless here, so the triangles are first binned into
-//  fixed screen tiles by their bounding box. A pixel then only tests the
-//  handful of triangles binned to ITS tile, and wholly empty tiles --
-//  usually most of the screen -- are skipped without touching a pixel.
-//
-//  Why this is a real alternative and not just a slower rasterizer: the
-//  two have opposite cost profiles. The z-buffer pays per covered pixel
-//  PER TRIANGLE (overdraw) in PSRAM traffic, which is this device's
-//  scarce resource; the raycaster pays per pixel of a non-empty tile in
-//  ALU work over a candidate list small enough to sit in cache, and
-//  touches PSRAM once per visible pixel regardless of depth complexity.
-//  Dense, heavily-overlapping scenes favour the raycaster; sparse ones
-//  favour the rasterizer, because it never looks at a pixel no triangle
-//  covers. Measure with scene_raster_stats() -- do not assume.
-// =====================================================================
-
-#define RC_TILE_SHIFT 4                                        // 16x16 px tiles
-#define RC_TILE       (1 << RC_TILE_SHIFT)
-#define RC_TILES_X    ((DISPLAY_LOG_W + RC_TILE - 1) / RC_TILE)
-#define RC_TILES_Y    ((DISPLAY_LOG_H + RC_TILE - 1) / RC_TILE)
-#define RC_TILES      (RC_TILES_X * RC_TILES_Y)
-
-// Capacity of the (triangle, tile) bin pool. A triangle is binned once
-// per tile its bbox touches, so this bounds total screen coverage, not
-// triangle count. On overflow the frame falls back to the z-buffer
-// renderer -- correct output, just not the renderer that was asked for.
-#define RC_BIN_CAP    32768
-
-// Candidates resolved in one pass over a tile's pixels. A tile holding
-// more than this is processed in several passes; the depth test makes
-// that safe (max-wins is order-independent), it just costs those pixels
-// one extra write per extra pass. Sized so the setup table stays small
-// enough to stay hot in cache.
-#define RC_TILE_CANDS 192
-
-// Per-triangle constants the pixel loop needs: three edge functions
-// oriented so "inside" is E >= 0 for either winding, and the same depth
-// plane the z-buffer rasterizer derives, in encoded uint16 units.
-typedef struct {
-    float e0a, e0b, e0c;
-    float e1a, e1b, e1c;
-    float e2a, e2b, e2c;
-    float As, Bs, Cs;
-    uint16_t packed;
-} rc_setup_t;
-
-static int32_t*   s_rc_off  = NULL;   // RC_TILES + 1 bin offsets
-static uint16_t*  s_rc_bin  = NULL;   // RC_BIN_CAP triangle indices
-static bool       s_rc_fail = false;  // this frame: fall back to z-buffer
-static bool       s_rc_warned = false;     // alloc failure, logged once
-static bool       s_rc_overflowed = false; // pool overflow, logged once
-static rc_setup_t s_rc_setup[RC_TILE_CANDS];
-
-// Lazily allocate the bin structures the first time the raycaster is
-// selected, so a game that only ever uses the z-buffer pays nothing.
-static bool rc_alloc(void) {
-    if (s_rc_off && s_rc_bin) return true;
-    if (!s_rc_off) {
-        s_rc_off = heap_caps_malloc((RC_TILES + 1) * sizeof(int32_t), MALLOC_CAP_INTERNAL);
-    }
-    if (!s_rc_bin) {
-        size_t const sz = (size_t)RC_BIN_CAP * sizeof(uint16_t);
-        s_rc_bin = heap_caps_malloc(sz, MALLOC_CAP_INTERNAL);
-        if (!s_rc_bin) s_rc_bin = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
-    }
-    if (!s_rc_off || !s_rc_bin) {
-        if (!s_rc_warned) {
-            ESP_LOGE(TAG, "raycast bin alloc failed (off=%p bin=%p) -- using z-buffer",
-                     s_rc_off, s_rc_bin);
-            s_rc_warned = true;
-        }
-        return false;
-    }
-    ESP_LOGI(TAG, "raycast bins: %dx%d tiles, pool %u entries (%uKB)",
-             RC_TILES_X, RC_TILES_Y, (unsigned)RC_BIN_CAP,
-             (unsigned)((RC_BIN_CAP * sizeof(uint16_t)) / 1024));
-    return true;
-}
-
-// Screen-space tile range a triangle's bounding box touches. Returns
-// false if the bbox is entirely off-screen (it then occupies no bin).
-static inline bool rc_tri_tiles(scene_tri_t const* t,
-                                int* tx0, int* ty0, int* tx1, int* ty1) {
-    float minx = t->v[0].sx, maxx = minx;
-    float miny = t->v[0].sy, maxy = miny;
-    for (int k = 1; k < 3; k++) {
-        float const x = t->v[k].sx, y = t->v[k].sy;
-        if (x < minx) minx = x; else if (x > maxx) maxx = x;
-        if (y < miny) miny = y; else if (y > maxy) maxy = y;
-    }
-    int ix0 = floor_i(minx), ix1 = ceil_i(maxx);
-    int iy0 = floor_i(miny), iy1 = ceil_i(maxy);
-    if (ix0 < s_vp_x0) ix0 = s_vp_x0;
-    if (iy0 < s_vp_y0) iy0 = s_vp_y0;
-    if (ix1 > s_vp_x1) ix1 = s_vp_x1;
-    if (iy1 > s_vp_y1) iy1 = s_vp_y1;
-    if (ix0 > ix1 || iy0 > iy1) return false;   // wholly outside the viewport
-    *tx0 = ix0 >> RC_TILE_SHIFT; *tx1 = ix1 >> RC_TILE_SHIFT;
-    *ty0 = iy0 >> RC_TILE_SHIFT; *ty1 = iy1 >> RC_TILE_SHIFT;
-    return true;
-}
-
-// Bin every triangle into the tiles its bbox covers, as a counting sort:
-// count per tile, prefix-sum to starts, then fill using the starts as
-// cursors. After the fill each cursor has advanced to its tile's END, and
-// the previous tile's cursor is this tile's start -- so tile t occupies
-// bin[ t ? off[t-1] : 0 .. off[t] ). No separate cursor array needed.
-static bool rc_bin_build(void) {
-    int32_t* const off = s_rc_off;
-    memset(off, 0, (RC_TILES + 1) * sizeof(int32_t));
-
-    int32_t total = 0;
-    for (int i = 0; i < s_tri_n; i++) {
-        int tx0, ty0, tx1, ty1;
-        if (!rc_tri_tiles(&s_tris[i], &tx0, &ty0, &tx1, &ty1)) continue;
-        for (int ty = ty0; ty <= ty1; ty++) {
-            int const row = ty * RC_TILES_X;
-            for (int tx = tx0; tx <= tx1; tx++) off[row + tx + 1]++;
-        }
-        total += (int32_t)(tx1 - tx0 + 1) * (int32_t)(ty1 - ty0 + 1);
-        if (total > RC_BIN_CAP) return false;   // pool would overflow
-    }
-    for (int i = 1; i <= RC_TILES; i++) off[i] += off[i - 1];
-
-    for (int i = 0; i < s_tri_n; i++) {
-        int tx0, ty0, tx1, ty1;
-        if (!rc_tri_tiles(&s_tris[i], &tx0, &ty0, &tx1, &ty1)) continue;
-        for (int ty = ty0; ty <= ty1; ty++) {
-            int const row = ty * RC_TILES_X;
-            for (int tx = tx0; tx <= tx1; tx++) s_rc_bin[off[row + tx]++] = (uint16_t)i;
-        }
-    }
-    return true;
-}
-
-// Per-triangle pixel-loop constants. The depth plane is derived exactly as
-// in scene_raster_tri, so both renderers interpolate identical depths. The
-// edge functions are negated for clockwise triangles (nz is twice the
-// signed area) so the inside test is E >= 0 regardless of winding.
-static bool rc_setup(scene_tri_t const* t, rc_setup_t* st) {
-    se_vtx_t const a = t->v[0], b = t->v[1], c = t->v[2];
-    float const ex1 = b.sx - a.sx, ey1 = b.sy - a.sy, ew1 = b.w - a.w;
-    float const ex2 = c.sx - a.sx, ey2 = c.sy - a.sy, ew2 = c.w - a.w;
-    float const nx  = ey1 * ew2 - ew1 * ey2;
-    float const ny  = ew1 * ex2 - ex1 * ew2;
-    float const nz  = ex1 * ey2 - ey1 * ex2;
-    if (nz > -1e-6f && nz < 1e-6f) return false;   // degenerate
-    float const inv_nz = 1.0f / nz;
-    st->As = (-nx * inv_nz) * SCENE_DEPTH_SCALE;
-    st->Bs = (-ny * inv_nz) * SCENE_DEPTH_SCALE;
-    st->Cs = a.w * SCENE_DEPTH_SCALE - st->As * a.sx - st->Bs * a.sy;
-
-    float const s = (nz < 0.0f) ? -1.0f : 1.0f;
-    st->e0a = s * -(b.sy - a.sy); st->e0b = s * (b.sx - a.sx);
-    st->e0c = s * ((b.sy - a.sy) * a.sx - (b.sx - a.sx) * a.sy);
-    st->e1a = s * -(c.sy - b.sy); st->e1b = s * (c.sx - b.sx);
-    st->e1c = s * ((c.sy - b.sy) * b.sx - (c.sx - b.sx) * b.sy);
-    st->e2a = s * -(a.sy - c.sy); st->e2b = s * (a.sx - c.sx);
-    st->e2c = s * ((a.sy - c.sy) * c.sx - (a.sx - c.sx) * c.sy);
-    st->packed = t->packed;
-    return true;
-}
-
-// Cast every pixel of one tile against `n` candidates. Sampling is at
-// integer pixel coordinates, the same points the z-buffer rasterizer
-// samples, so the two renderers agree except where a sample lands exactly
-// on a shared edge and the tie breaks the other way.
-//
-// Iteration is x-outer / y-inner because a logical +1 y step is a -1 step
-// in the framebuffer index (see direct_565_logical_index) -- so the inner
-// loop walks memory contiguously, matching the rasterizer's column scan.
-static void rc_cast_tile(int tx, int ty, rc_setup_t const* set, int n) {
-    // A tile straddling the viewport edge is resolved only over the part
-    // inside it; one wholly outside was never binned, so it never gets
-    // here.
-    int x0 = tx << RC_TILE_SHIFT;
-    int y0 = ty << RC_TILE_SHIFT;
-    int x1 = x0 + RC_TILE, y1 = y0 + RC_TILE;
-    if (x0 < s_vp_x0) x0 = s_vp_x0;
-    if (y0 < s_vp_y0) y0 = s_vp_y0;
-    if (x1 > s_vp_x1 + 1) x1 = s_vp_x1 + 1;
-    if (y1 > s_vp_y1 + 1) y1 = s_vp_y1 + 1;
-    if (x0 >= x1 || y0 >= y1) return;
-
-    uint16_t const frame = s_frame;
-    int      const base  = scene_index(x0, y0);
-
-    for (int x = x0; x < x1; x++) {
-        float const fx  = (float)x;
-        int         idx = base + (x - x0) * DISPLAY_RAW_STRIDE;
-        for (int y = y0; y < y1; y++, idx--) {
-            float const fy = (float)y;
-            float    best  = 0.0f;
-            uint16_t bestp = 0;
-            bool     hit   = false;
-            // Nearest hit along the ray. The early-out on the first
-            // failing edge is what makes a fat candidate list cheap:
-            // a triangle whose tile the pixel is outside of costs one
-            // multiply-add and a compare.
-            for (int k = 0; k < n; k++) {
-                rc_setup_t const* const st = &set[k];
-                if (st->e0a * fx + st->e0b * fy + st->e0c < 0.0f) continue;
-                if (st->e1a * fx + st->e1b * fy + st->e1c < 0.0f) continue;
-                if (st->e2a * fx + st->e2b * fy + st->e2c < 0.0f) continue;
-                float const d = st->As * fx + st->Bs * fy + st->Cs;
-                if (!hit || d > best) { best = d; bestp = st->packed; hit = true; }
-            }
-            if (!hit) continue;   // ray missed -> pixel (and its depth) untouched
-
-            int di = (int)best;
-            if (di < 0) di = 0;
-            // Still depth-tested: a tile with more candidates than
-            // RC_TILE_CANDS is resolved in several passes, and the later
-            // passes must lose to nearer pixels the earlier ones wrote.
-            uint32_t const cell   = s_ds[idx];
-            uint16_t const stored = ((uint16_t)(cell >> 16) == frame) ? (uint16_t)cell : 0;
-            if ((uint16_t)di >= stored) {
-                s_fb[idx] = bestp;
-                s_ds[idx] = ((uint32_t)frame << 16) | (uint32_t)di;
-            }
-        }
-    }
-}
-
-static void raycast_prepare(void* user) {
-    (void)user;
-    // Falling back is not an error path the caller has to handle: the
-    // frame still renders, just with the other renderer.
-    if (!rc_alloc()) { s_rc_fail = true; return; }   // rc_alloc() logs once itself
-    s_rc_fail = !rc_bin_build();
-    if (s_rc_fail && !s_rc_overflowed) {
-        ESP_LOGW(TAG, "raycast bin pool exhausted (%d tris) -- frame falls back to z-buffer",
-                 s_tri_n);
-        s_rc_overflowed = true;
-    }
-}
-
-static void raycast_rasterize(void* user) {
-    if (s_rc_fail) { zbuf_rasterize(user); return; }
-
-    int64_t const t_r0 = esp_timer_get_time();
-    int32_t const* const off = s_rc_off;
-    for (int t = 0; t < RC_TILES; t++) {
-        int32_t const lo = t ? off[t - 1] : 0;
-        int32_t const hi = off[t];
-        if (lo >= hi) continue;                   // empty tile: never touched
-        int const tx = t % RC_TILES_X, ty = t / RC_TILES_X;
-        // Chunked so a pathologically deep tile can't overrun the setup
-        // table; the depth test makes multi-pass resolution correct.
-        for (int32_t c = lo; c < hi; c += RC_TILE_CANDS) {
-            int32_t const end = (hi - c > RC_TILE_CANDS) ? c + RC_TILE_CANDS : hi;
-            int n = 0;
-            for (int32_t k = c; k < end; k++) {
-                if (rc_setup(&s_tris[s_rc_bin[k]], &s_rc_setup[n])) n++;
-            }
-            if (n) rc_cast_tile(tx, ty, s_rc_setup, n);
-        }
-    }
-    int64_t const t_r1 = esp_timer_get_time();
-    // Textured triangles are not cast: they go through the shared
-    // textured rasterizer, depth-tested against what the ray hits wrote
-    // (same depth encoding), so the two compose exactly as in the
-    // z-buffer renderer.
-    se_scene_raster_textured();
-    int64_t const t_r1b = esp_timer_get_time();
-    // Wireframe edges are an overlay in both renderers: same Bresenham
-    // pass, z-tested against the depth the ray hits just wrote.
-    for (int i = 0; i < s_line_n; i++) {
-        scene_raster_line(s_lines[i].v[0], s_lines[i].v[1], s_lines[i].packed);
-    }
-    int64_t const t_r2 = esp_timer_get_time();
-    s_stat_tri_us  = t_r1 - t_r0;
-    s_stat_line_us = t_r2 - t_r1b;
-    // Points last, over everything (timed inside, like the textured pass).
-    se_scene_raster_points();
-}
-
-// =====================================================================
 //  Renderer table + dispatch
 // =====================================================================
 
 static se_renderer_t s_renderers[SE_RENDER_MAX] = {
-    [SE_RENDER_ZBUFFER] = { "zbuffer", zbuf_prepare,    zbuf_rasterize,    NULL },
-    [SE_RENDER_RAYCAST] = { "raycast", raycast_prepare, raycast_rasterize, NULL },
+    [SE_RENDER_ZBUFFER] = { "zbuffer", zbuf_prepare, zbuf_rasterize, NULL },
 };
 static int s_renderer_n = SE_RENDER_BUILTIN_COUNT;
 
@@ -1872,9 +1585,6 @@ char const* se_renderer_name(se_render_mode_t mode) {
 // Resolve a mode to a usable renderer, falling back to the default rather
 // than dereferencing a bogus handle.
 static se_renderer_t const* renderer_for(se_render_mode_t mode) {
-    // The raycaster's tiles are sized for the full screen: at quarter
-    // resolution the z-buffer renders instead.
-    if (s_div != 1 && mode == SE_RENDER_RAYCAST) mode = SE_RENDER_ZBUFFER;
     if ((int)mode < 0 || (int)mode >= s_renderer_n || !s_renderers[mode].rasterize) {
         return &s_renderers[SE_RENDER_DEFAULT];
     }
@@ -1915,7 +1625,7 @@ void scene_rasterize(se_render_mode_t mode) {
 
     // Diagnostics: counts (post-cull) + per-phase wallclock, so a profiler
     // can see how the rasterize splits between filled geometry and the
-    // wireframe edges -- and so the two renderers can be compared directly.
+    // wireframe edges -- and so a custom renderer can be compared with it.
     s_stat_tri_n  = s_tri_n;
     s_stat_line_n = s_line_n;
     s_stat_ttri_n  = s_ttri_n;

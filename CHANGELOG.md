@@ -15,9 +15,33 @@ release.
 
 ## [2.2] — 2026-09-23
 
-Additive only: a 2.1 game builds unchanged. Still unreleased and still
-being worked on, so it collects everything of this round rather than
-taking a number per change.
+A 2.1 game builds unchanged unless it selects `SE_RENDER_RAYCAST` (see
+below). Still unreleased and still being worked on, so it collects
+everything of this round rather than taking a number per change.
+
+### Removed — the raycast renderer (a deliberate exception to MAJOR)
+
+`SE_RENDER_RAYCAST` and the tiled primary-ray renderer behind it are
+gone; the z-buffer is the only built-in renderer. `SE_RENDER_BUILTIN_COUNT`
+drops from 2 to 1, so `se_renderer_register()` now hands out handles
+from 1. Registered handles were always opaque, so only a game that
+hard-coded one would notice.
+
+Removing a public symbol is a MAJOR change by the rules above. This one
+is recorded under 2.2 on purpose: no game renders with the raycaster, and
+the only reference, Race the Synth's debug key that toggles to it, goes
+when that game next moves its engine. A 3.0 for one debug key would say
+more than the change does.
+
+Why remove it: no game ever chose it. The measurement it shipped with
+(1.0.0, below) had Race the Synth at 60.9 ms raycast against 12.6-22.4 ms
+z-buffer. It still had to be kept in step with every renderer change —
+near clipping, the viewport,
+textures, quarter resolution (where it just fell back to the z-buffer) —
+and it would have had to follow the renderer work now planned (banded
+rendering in internal SRAM), where it would only get in the way. About
+300 lines and its bin buffers (a 32768-entry pool, allocated on first
+use) go with it.
 
 ### Changed — the present flips pages instead of copying (needs graceloader 2.6.0)
 

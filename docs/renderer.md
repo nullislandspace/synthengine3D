@@ -81,7 +81,7 @@ submit ─▶ [tri list] [edge list] ─▶ scene_render: cull ─▶ order ─�
 ```
 
 `se_render_mode_t` selects the algorithm: `SE_RENDER_ZBUFFER`
-(= `SE_RENDER_DEFAULT`) or `SE_RENDER_RAYCAST`, or one a game registers.
+(= `SE_RENDER_DEFAULT`), or one a game registers.
 
 **Near-plane clipping** happens at submit time, in camera space, against
 `RENDER_NEAR_CLIP_Z` (it is not the central cull):
@@ -224,9 +224,8 @@ se_ppa_buf_invalidate(fb);          // only if the CPU reads fb afterwards (a sc
   between scenes or shots freely (`scene_render_scale()` reads back the
   requested one); at scale 1 the output is bit for bit what it always was.
 - Lines and points stay one target pixel wide: two screen pixels.
-- The **raycast renderer** falls back to the z-buffer at quarter resolution
-  (its tiles are sized for the full screen). A custom renderer sees
-  `se_geometry_t.scale` and must address the half-size target itself.
+- A custom renderer sees `se_geometry_t.scale` and must address the
+  half-size target itself.
 - **The upscale.** `se_ppa_blit_scaled()` runs on the PPA and costs the CPU
   nothing, but the PPA's scaler **interpolates** (it has no nearest-neighbour
   setting), so the pixels come out soft rather than as crisp 2×2 blocks. The
@@ -395,8 +394,7 @@ scene_textured_tri(v, metal, 0);
   isn't allocated until the first texture loads. They rasterize after the flat
   triangles and before the edges, depth-tested against both, so the three
   primitives mix freely. Cull and order apply to that list as they do to the
-  flat one. The raycast renderer draws them with the same textured pass,
-  against the depth its ray hits wrote. A custom renderer sees them in
+  flat one. A custom renderer sees them in
   `se_geometry_t.ttris` and can call `se_scene_raster_textured()`.
 - **Lighting** applies as it does to flat triangles: the same per-face shade,
   computed at submit time, kept as a 0..32 factor and applied to each texel.
