@@ -13,7 +13,7 @@ It shows the whole shape of an engine app:
 - **`on_render(fb)`** draws the 3D scene: `scene_begin` → `scene_tri` →
   `scene_render`. The engine cleared the backdrop before this.
 
-Everything else — device bootstrap, the frame loop, vsync + blit, the input
+Everything else — device bootstrap, the frame loop, the page flip, the input
 pump, F1-exit — is the engine's.
 
 ## Building it

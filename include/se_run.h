@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------
 //  The engine's run loop (inversion of control): the game calls se_run()
 //  once and the engine owns the frame loop, the device bootstrap, the
-//  input-queue pump, the device-global keys, vsync/blit, and the backdrop
+//  input-queue pump, the device-global keys, the page flip, and the backdrop
 //  clear. The game plugs in via the callbacks below — it is content +
 //  per-frame logic, not loop plumbing. Part of the versioned public surface
 //  (see se_version.h). Overview + the frame lifecycle: docs/architecture.md;
@@ -58,7 +58,7 @@ typedef struct {
     void (*on_backdrop)(pax_buf_t* fb, void* user);
 
     // Draw the frame (3D scene via se_scene, HUD, menus) into `fb`,
-    // after the backdrop and before the engine blits at vsync.
+    // after the backdrop and before the engine flips it onto the display.
     void (*on_render)(pax_buf_t* fb, void* user);
 
     // Optional: called once if the loop is ever asked to stop
@@ -99,16 +99,17 @@ void se_display_info(se_display_info_t* out);
 // Wallclock of the most recent present, split into its two halves, in
 // microseconds. Either pointer may be NULL.
 //
-//   blit_us   bsp_display_blit(): handing the finished back buffer to
-//             the LCD. Real transfer work, proportional to the screen,
-//             not to what was drawn.
-//   vsync_us  waiting for the panel's tearing-effect signal after the
-//             blit returned. Idle time. Near zero means the frame just
-//             made its refresh window; close to a whole refresh period
-//             means it just missed one and is waiting for the next.
-//             About 50 ms (the wait's timeout) means the signal never
-//             came. Without a tearing-effect line it is the fixed 16 ms
-//             fallback delay.
+//   blit_us   the page flip: writing the finished back buffer out of the
+//             CPU cache and selecting it for the next display refresh.
+//             Nothing is copied (the framebuffers are the display's
+//             own), so this is small, and grows with how much of the
+//             frame is still dirty in the cache.
+//   vsync_us  waiting, before the flip, for the display to pick up the
+//             previous frame. The engine triple-buffers, so this is zero
+//             for a game slower than the refresh rate (60 Hz); a faster
+//             one waits here instead of drawing frames that are never
+//             shown. About 100 ms (the wait's timeout) means the display
+//             is not refreshing.
 //
 // The present runs after on_render returns, so a call from on_render
 // reports the previous frame's present -- the one that happened since

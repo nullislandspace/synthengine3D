@@ -3,10 +3,10 @@
 // ---------------------------------------------------------------------
 //  Implements the inversion-of-control entry point declared in
 //  include/se_run.h. The engine owns the device bootstrap (NVS, BSP,
-//  display, double-buffered framebuffers, the 3D scene buffers, the
-//  audio mixer, the vsync/tearing-effect semaphore), the per-frame loop
-//  (delta-time, callback dispatch, default backdrop clear, blit at
-//  vsync, buffer swap), the input-queue pump and the device-global keys
+//  display and its three page-flipped framebuffers, the 3D scene buffers,
+//  the audio mixer, the refresh-done semaphore), the per-frame loop
+//  (delta-time, callback dispatch, default backdrop clear, page flip),
+//  the input-queue pump and the device-global keys
 //  (volume +/-, audio-jack re-route, F1-exit when cfg.f1_exits), and the
 //  blocking se_ui_capture_key rebind modal (it needs the loop's frame
 //  primitives, so it lives here though declared in se_ui.h). Events the
@@ -29,31 +29,31 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"   // event/key enums + types
+#include "esp_lcd_mipi_dsi.h"   // esp_lcd_dpi_panel_get_frame_buffer
+#include "esp_lcd_panel_ops.h"  // esp_lcd_panel_draw_bitmap
 #include "gl_input.h"    // gl_input_get_queue (USB + native merged)
-#include "esp_heap_caps.h"
+#include "graceloader.h" // graceloader_display_register_callbacks
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "hal/lcd_types.h"
 #include "nvs_flash.h"
 #include "pax_gfx.h"
 
-// ESP32-P4 PSRAM L2 cache line. The framebuffers live in PSRAM and are
-// read by DMA (LCD scan-out) and by hardware blocks (e.g. a game's PPA
-// backdrop), so they are allocated cache-line aligned and rounded up to
-// a whole line so their tail does not share a line with neighbours.
-#define SE_PSRAM_CACHE_LINE 128
-
 static char const TAG[] = "se_run";
 
 // ---- Engine-owned display + framebuffer state -----------------------
 static se_display_info_t  s_di         = {0};
-static pax_buf_t          s_fb_a       = {0};
-static pax_buf_t          s_fb_b       = {0};
-static pax_buf_t*         s_fb         = &s_fb_a;   // back buffer (drawn into)
-static pax_buf_t*         s_fb_front   = &s_fb_b;   // front buffer (scanned out)
-static void*              s_fb_a_px    = NULL;
-static void*              s_fb_b_px    = NULL;
-static SemaphoreHandle_t  s_vsync_sem  = NULL;
+// The display driver's three framebuffers, triple-buffered (se_present).
+// s_fb_shown is what the display read at its last refresh, s_fb_selected
+// what the engine last handed it; the one that is neither is drawn into.
+#define SE_FB_COUNT 3
+static pax_buf_t              s_fbs[SE_FB_COUNT]  = {0};
+static pax_buf_t*             s_fb                = NULL;   // back buffer (drawn into)
+static int                    s_fb_back           = 1;
+static volatile int           s_fb_shown          = 0;      // written by se_on_refresh_done
+static volatile int           s_fb_selected       = 0;
+static esp_lcd_panel_handle_t s_panel             = NULL;
+static SemaphoreHandle_t      s_refresh_sem       = NULL;   // given once per display refresh
 
 // Loop control. Set by se_request_exit(); the loop checks it once per
 // frame and falls out (firing on_shutdown) when set.
@@ -129,42 +129,86 @@ static void se_pump_input(se_app_callbacks_t const* cb, void* user) {
     }
 }
 
-// Present the back buffer: hand it to the LCD, wait for the vsync
-// (tearing-effect) signal, then swap so the buffer just sent becomes the
-// front (scanned out) and the previous front becomes the next back. The
-// CPU and any hardware block only ever touch *s_fb, never the buffer the
-// LCD is reading -- no tearing.
+// Called by graceloader from the display's interrupt, once per refresh
+// (graceloader_display_register_callbacks), right after the interrupt
+// restarted the refresh with the buffer the driver has selected. So the
+// display now reads s_fb_selected -- or, if a flip is between its
+// draw_bitmap and the store to s_fb_selected, the buffer being flipped
+// to, which se_present never draws into either.
 //
-// Both halves are timed (se_present_stats): the blit is work, the vsync
-// wait is idle, and a game reading one lump "present" figure cannot tell
-// a slow transfer from a frame that just missed its refresh window.
+// Skipped while a flash write has the cache off. The refresh still runs,
+// so the display may move on to the selected buffer unrecorded; but the
+// game's tasks cannot run then either, and se_present waits for a record
+// before it flips again, so a skip only delays that wait by a refresh.
+static bool se_on_refresh_done(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t* edata,
+                               void* user_ctx) {
+    (void)panel;
+    (void)edata;
+    (void)user_ctx;
+    s_fb_shown       = s_fb_selected;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_refresh_sem, &woken);
+    return woken == pdTRUE;
+}
+
+// Present the back buffer by page flipping between the display driver's
+// own three framebuffers: draw_bitmap copies nothing, it writes the back
+// buffer out of the cache and selects it for the next refresh.
+//
+// Triple buffering, so a frame never waits for the display to let go of
+// a buffer: the display reads one (shown), one waits for the next
+// refresh (selected), and the third is drawn into. The display only
+// ever reads shown or selected, so the CPU and any hardware block, which
+// only touch *s_fb, never draw into a buffer being read -- no tearing.
+//
+// The one wait is before the flip: a frame is only handed over once the
+// display has picked up the previous one. A game faster than the refresh
+// rate waits here instead of drawing frames that are never shown; a
+// slower one finds it done and does not wait at all. The semaphore is
+// cleared before s_fb_shown is checked, and the callback stores
+// s_fb_shown before it gives, so a refresh in between cannot be missed.
+//
+// This relies on the callback coming from the interrupt that restarts
+// the refresh, which holds for ESP32-P4 builds below chip revision 3.0
+// (graceloader's). From 3.0 on it comes from the DSI bridge's vsync,
+// slightly later, and a flip in between would be recorded as shown
+// while the display reads the previous buffer (see graceloader.h).
+//
+// Both halves are timed (se_present_stats): the wait is idle, the flip
+// is work (the cache write-back), and a game reading one lump "present"
+// figure cannot tell them apart.
 static int64_t s_present_blit_us  = 0;
 static int64_t s_present_vsync_us = 0;
 
 static void se_present(void) {
     int64_t const t0 = esp_timer_get_time();
-    bsp_display_blit(0, 0, s_di.width, s_di.height, pax_buf_get_pixels(s_fb));
+    xSemaphoreTake(s_refresh_sem, 0);
+    while (s_fb_shown != s_fb_selected) {
+        if (xSemaphoreTake(s_refresh_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
+            break;   // the display is not refreshing; nothing reads the buffers
+        }
+    }
+    // Shown and selected are the same buffer now; read it once; the
+    // callback may overwrite s_fb_shown at any point below.
+    int const shown = s_fb_selected;
     int64_t const t1 = esp_timer_get_time();
 
-    if (s_vsync_sem != NULL) {
-        xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(50));
-    } else {
-        vTaskDelay(pdMS_TO_TICKS(16));
-    }
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, (int)s_di.width, (int)s_di.height, pax_buf_get_pixels(s_fb));
+    s_fb_selected = s_fb_back;
+    // The display reads `shown` or the buffer just selected; the next back
+    // buffer is the third one.
+    s_fb_back = 3 - shown - s_fb_selected;
+    s_fb      = &s_fbs[s_fb_back];
     int64_t const t2 = esp_timer_get_time();
 
-    s_present_blit_us  = t1 - t0;
-    s_present_vsync_us = t2 - t1;
-
-    pax_buf_t* tmp = s_fb;
-    s_fb           = s_fb_front;
-    s_fb_front     = tmp;
+    s_present_vsync_us = t1 - t0;
+    s_present_blit_us  = t2 - t1;
 }
 
 // ---- Internal frame access (src/internal/se_frame.h) -----------------
 //
 // Lets an engine facility outside this file run its own present loop (the
-// splash screen). Gated on s_fb_a_px so a call made before se_run() has
+// splash screen). Gated on s_fb so a call made before se_run() has
 // bootstrapped reports "no frame" instead of handing out a zero-initialised
 // pax_buf_t.
 
@@ -174,11 +218,11 @@ void se_present_stats(int64_t* blit_us, int64_t* vsync_us) {
 }
 
 pax_buf_t* se_frame_back(void) {
-    return (s_fb_a_px != NULL) ? s_fb : NULL;
+    return s_fb;
 }
 
 void se_frame_present(void) {
-    if (s_fb_a_px != NULL) se_present();
+    if (s_fb != NULL) se_present();
 }
 
 // ---- Rebind key capture ---------------------------------------------
@@ -282,8 +326,8 @@ uint16_t se_ui_capture_key(char const* prompt_label) {
     return captured;
 }
 
-// Bootstrap NVS, BSP, the display, the framebuffers, the scene buffers,
-// the audio mixer and vsync. Returns true on success; on failure logs
+// Bootstrap NVS, BSP, the display, the framebuffers and the refresh
+// callback, the scene buffers and the audio mixer. Returns true on success; on failure logs
 // and returns false (se_run then bails before the loop).
 static bool se_bootstrap(void) {
     esp_err_t res = nvs_flash_init();
@@ -297,7 +341,7 @@ static bool se_bootstrap(void) {
         .display =
             {
                 .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_16_565RGB,
-                .num_fbs                = 1,
+                .num_fbs                = SE_FB_COUNT,   // page flipping, see se_present
             },
     };
     res = bsp_device_initialize(&bsp_configuration);
@@ -337,28 +381,43 @@ static bool se_bootstrap(void) {
     s_di.reversed    = (data_endian == BSP_DISPLAY_ENDIAN_BIG);
     s_di.orientation = orientation;
 
-    // Two PSRAM framebuffers, PPA/DMA-aligned, each wrapped in a pax_buf_t
-    // so PAX rasterises straight into the raw layout the LCD reads.
-    size_t const fb_size         = (size_t)h_res * v_res * 2u;
-    size_t const aligned_fb_size =
-        (fb_size + SE_PSRAM_CACHE_LINE - 1) & ~(size_t)(SE_PSRAM_CACHE_LINE - 1);
-    s_fb_a_px = heap_caps_aligned_alloc(SE_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
-    s_fb_b_px = heap_caps_aligned_alloc(SE_PSRAM_CACHE_LINE, aligned_fb_size, MALLOC_CAP_SPIRAM);
-    if (s_fb_a_px == NULL || s_fb_b_px == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate framebuffers (a=%p b=%p)", s_fb_a_px, s_fb_b_px);
+    // The display driver's framebuffers (PSRAM, cache-line aligned by the
+    // driver), each wrapped in a pax_buf_t so PAX rasterises straight into
+    // the raw layout the display reads. The driver shows the first one
+    // after initialisation, so drawing starts in the second.
+    void* fb_px[SE_FB_COUNT] = {NULL};
+    res = bsp_display_get_panel(&s_panel);
+    if (res == ESP_OK) {
+        res = esp_lcd_dpi_panel_get_frame_buffer(s_panel, SE_FB_COUNT, &fb_px[0], &fb_px[1], &fb_px[2]);
+    }
+    if (res != ESP_OK || fb_px[0] == NULL || fb_px[1] == NULL || fb_px[2] == NULL) {
+        ESP_LOGE(TAG, "Failed to get the display's framebuffers: %s", esp_err_to_name(res));
+        return false;
+    }
+    for (int i = 0; i < SE_FB_COUNT; i++) {
+        pax_buf_init(&s_fbs[i], fb_px[i], h_res, v_res, format);
+        pax_buf_reversed(&s_fbs[i], s_di.reversed);
+        pax_buf_set_orientation(&s_fbs[i], orientation);
+    }
+    s_fb_shown    = 0;
+    s_fb_selected = 0;
+    s_fb_back     = 1;
+
+    // Refresh-done, for the page flip. graceloader forwards the driver's
+    // interrupt (it only accepts IRAM callbacks, and the game is in PSRAM).
+    s_refresh_sem = xSemaphoreCreateBinary();
+    if (s_refresh_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create the refresh semaphore");
+        return false;
+    }
+    esp_lcd_dpi_panel_event_callbacks_t const display_cbs = {.on_refresh_done = se_on_refresh_done};
+    res = graceloader_display_register_callbacks(&display_cbs, NULL);
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register the display refresh callback: %s", esp_err_to_name(res));
         return false;
     }
 
-    pax_buf_init(&s_fb_a, s_fb_a_px, h_res, v_res, format);
-    pax_buf_reversed(&s_fb_a, s_di.reversed);
-    pax_buf_set_orientation(&s_fb_a, orientation);
-
-    pax_buf_init(&s_fb_b, s_fb_b_px, h_res, v_res, format);
-    pax_buf_reversed(&s_fb_b, s_di.reversed);
-    pax_buf_set_orientation(&s_fb_b, orientation);
-
-    s_fb       = &s_fb_a;
-    s_fb_front = &s_fb_b;
+    s_fb = &s_fbs[s_fb_back];   // last: se_frame_back() reports "ready" from here on
 
     // 3D scene buffers (depth/stamp/line list) -- compile-time sized.
     scene_init();
@@ -381,17 +440,6 @@ static bool se_bootstrap(void) {
     if (res != ESP_OK) {
         ESP_LOGW(TAG, "gl_input_get_queue failed: %d -- input will be dead", res);
         s_input_queue = NULL;
-    }
-
-    // Vsync via the panel tearing-effect line. Optional: without it the
-    // loop falls back to a fixed delay (animation may stutter).
-    esp_err_t te_err = bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING);
-    if (te_err == ESP_OK) {
-        te_err = bsp_display_get_tearing_effect_semaphore(&s_vsync_sem);
-    }
-    if (te_err != ESP_OK || s_vsync_sem == NULL) {
-        ESP_LOGW(TAG, "Vsync not available -- animation may stutter");
-        s_vsync_sem = NULL;
     }
 
     return true;
@@ -446,7 +494,7 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
             cb->on_render(s_fb, user);
         }
 
-        // Hand the finished frame to the LCD at vsync, then swap buffers.
+        // Flip to the finished frame at the next refresh.
         se_present();
     }
 

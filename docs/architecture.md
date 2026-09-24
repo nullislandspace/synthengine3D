@@ -9,11 +9,11 @@ inversion is the spine everything else hangs off.
 The game calls `se_run(&cfg, &cb, user)` exactly once (from `app_main`) and
 never returns under graceloader. The engine owns:
 
-- **device + subsystem bootstrap** — NVS, BSP, display + two framebuffers,
-  the 3D scene buffers (`scene_init`), the audio mixer (`audio_mixer_init`),
-  device-global settings (`se_hw_init`), the vsync/tearing-effect semaphore;
+- **device + subsystem bootstrap** — NVS, BSP, display + its three
+  framebuffers and the refresh callback, the 3D scene buffers (`scene_init`),
+  the audio mixer (`audio_mixer_init`), device-global settings (`se_hw_init`);
 - **the frame loop** — per-frame delta-time (clamped), callback dispatch, the
-  default backdrop clear, the blit at vsync, the double-buffer swap;
+  default backdrop clear, the page flip;
 - **the input-queue pump** — it drains the BSP event queue each frame and
   consumes the device-global keys itself (volume ±, audio-jack re-route, and
   F1-exit when `cfg.f1_exits`), forwarding everything else to `on_input`.
@@ -40,12 +40,18 @@ the Synth passes `NULL` and uses file-scope state instead; both are fine.)
         │  compute dt  ─▶ on_update(dt)        ── game state machine / physics     │
         │              ─▶ on_backdrop(fb)      ── or engine clears to backdrop_argb │
         │              ─▶ on_render(fb)        ── scene_begin → submit → scene_render│
-        │  blit fb at vsync ─▶ swap buffers                                         │
+        │  page flip   ─▶ next back buffer     ── fb is shown from the next refresh │
         └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-The two framebuffers are the engine's; it hands the live back buffer to
-`on_backdrop` / `on_render` as `fb`. A game that keeps many draw helpers can
+The framebuffers are the display driver's own three, triple-buffered: the
+display reads one, one waits for the next refresh, and the engine hands the
+third to `on_backdrop` / `on_render` as `fb`. A present copies nothing — it
+selects `fb` for the next refresh (page flip) — and only waits when the game
+is faster than the 60 Hz refresh. The refresh signal comes from graceloader
+(`graceloader_display_register_callbacks`, graceloader 2.6.0 or later): the
+display driver only accepts callbacks in IRAM, and a game's code is in PSRAM.
+`fb` is a different buffer from frame to frame, so re-read it every frame. A game that keeps many draw helpers can
 mirror that pointer into a file-scope `fb` at the top of each callback (Race
 the Synth does this) — but the buffer itself is engine-owned.
 

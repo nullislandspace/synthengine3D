@@ -277,8 +277,9 @@ pointer may be NULL):
 - `scene_textured_stats(&ttri_n, &ttri_us)` — the textured pass.
 - `scene_point_stats(&pt_n, &pt_us)` — the point pass.
 - `se_present_stats(&blit_us, &vsync_us)` ([`se_run.h`](../include/se_run.h)) —
-  the present after the frame: the LCD blit and the wait for the
-  tearing-effect signal. Read from `on_render`, it is the previous frame's.
+  the present after the frame: the page flip, and the wait for the display
+  to pick up the previous frame (zero unless the game is faster than the
+  refresh). Read from `on_render`, it is the previous frame's.
 
 ## Depth buffer
 

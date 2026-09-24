@@ -19,6 +19,42 @@ Additive only: a 2.1 game builds unchanged. Still unreleased and still
 being worked on, so it collects everything of this round rather than
 taking a number per change.
 
+### Changed — the present flips pages instead of copying (needs graceloader 2.6.0)
+
+No public call changes, but **a game built with this engine needs
+graceloader 2.6.0 or later**, which provides the display callback it uses.
+
+Until now the engine drew into two framebuffers of its own, and each
+present copied the finished one, all 768 KB, into the display driver's
+own buffer, then waited on the panel's tearing-effect line. The copy ran
+on DMA2D, so it cost little CPU, but it moved 1.5 MB through PSRAM every
+frame — the same bus the rasterizer waits on — and it could land while
+the display was reading that buffer.
+
+The engine now draws straight into the driver's buffers, three of them,
+and a present only selects the finished one for the next refresh. Three,
+not two: with two, every frame would wait for the refresh that frees
+the other buffer, on average half a refresh (8 ms at 60 Hz), about 10%
+of a CraftMiner frame. With three, the display reads one, one waits for
+the refresh, and the game draws into the third, so a game slower than
+60 Hz never waits. A faster one waits for the refresh before flipping,
+rather than drawing frames that are never shown. PSRAM use is unchanged
+(three buffers before as well: two of the engine's plus the driver's).
+
+The refresh signal comes from graceloader's
+`graceloader_display_register_callbacks()`. The display driver only
+accepts interrupt callbacks in IRAM, and a game's code is in PSRAM.
+
+`se_present_stats()` keeps its two figures, with new meanings:
+`blit_us` is the flip (the cache write-back), `vsync_us` the wait for
+the display to pick up the previous frame, before the flip. `vsync_us`
+is 0 for a game slower than the refresh. The tearing-effect line is no
+longer used.
+
+`fb` still changes every frame; it now rotates through three buffers
+instead of alternating between two. Read it from the callback's argument
+(or `se_frame_back()`) every frame, as before.
+
 ### Added — a scene-wide colour tint
 
 ```c

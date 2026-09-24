@@ -17,7 +17,7 @@ it requires a MAJOR bump.
 
 | Subsystem | Header | What |
 |---|---|---|
-| **Application framework** | `se_run.h` | Inversion-of-control run loop: you call `se_run(&cfg, &cb, user)` once; the engine owns device bootstrap, the frame loop + delta-time, the input-queue pump, the device-global keys (volume / audio-jack / F1-exit), vsync + blit + double-buffer swap, and a backdrop hook. Your game is a set of callbacks. |
+| **Application framework** | `se_run.h` | Inversion-of-control run loop: you call `se_run(&cfg, &cb, user)` once; the engine owns device bootstrap, the frame loop + delta-time, the input-queue pump, the device-global keys (volume / audio-jack / F1-exit), the page flip (triple-buffered, no copy), and a backdrop hook. Your game is a set of callbacks. |
 | **3D renderer** | `se_scene.h` | Per-pixel **z-buffered** software rasterizer + **6-DOF** pinhole camera + projection. Submit world-space triangles / wireframe edges / single-pixel points (`scene_point`, e.g. starfields); the engine projects, **clips at the near plane**, depth-tests and draws. Deferred: it accumulates the frame then `scene_render()`s it, with opt-in **frustum-cull** and **front-to-back ordering** passes (`scene_set_options`), a clipping **viewport**, per-frame **quarter-resolution** rendering (a quarter of the fill work, scaled back up by the PPA), and **pluggable renderers** (z-buffer, raycast, or your own). |
 | **Scene lighting** | `se_light.h` | Optional **single positional light**, shaded **per face at submit time** inside `scene_tri` (not per pixel). `brightness` is the directional share of total illumination; the rest is global fill, so a face turned away falls to a floor rather than to black. Winding-independent via `two_sided`. No shadows, no falloff, no specular. |
 | **Textures** | `se_texture.h` | Load / unload **PNG textures** (power-of-two, RGB565, **cut-out transparency** from the PNG's alpha), optionally into **internal SRAM**. `scene_textured_tri()` maps them onto triangles **perspective-correct**, nearest-texel, lit by `se_light` like flat triangles; a separate list, so flat triangles and edges are unchanged. |
@@ -71,7 +71,7 @@ void app_main(void) {
 ```
 
 That is a complete graceloader app: the engine boots the device, clears the
-screen to the backdrop colour each frame, runs your callbacks, blits at vsync,
+screen to the backdrop colour each frame, runs your callbacks, flips at the refresh,
 and exits to the launcher on F1. See [`examples/minimal/`](examples/minimal/)
 for the same thing with comments, and [`docs/getting-started.md`](docs/getting-started.md)
 for adding audio, menus and a save file.

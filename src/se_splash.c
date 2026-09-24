@@ -310,9 +310,9 @@ void se_splash_ex(char const* title, char const* subtitle, float seconds) {
         float const z = SPLASH_Z_FAR + (SPLASH_Z_NEAR - SPLASH_Z_FAR) * e;
         float const k = 0.30f + 0.70f * e;   // brightness ramp
 
-        // Re-read the back buffer every frame: present() swaps it. The held
-        // frames still have to be redrawn -- with double buffering the two
-        // buffers alternate, so skipping the redraw would flicker.
+        // Re-read the back buffer every frame: present() rotates it. The
+        // held frames still have to be redrawn -- the framebuffers take
+        // turns, so skipping the redraw would flicker.
         pax_buf_t* const fb = se_frame_back();
         pax_background(fb, 0xFF000000u);
 

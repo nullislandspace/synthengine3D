@@ -30,7 +30,7 @@ void app_main(void) {
 ```
 
 `se_run` boots the device, then loops: clear to `backdrop_argb`, call
-`on_update`, call `on_render`, blit at vsync. F1 returns to the launcher. See
+`on_update`, call `on_render`, flip to the new frame. F1 returns to the launcher. See
 [`../examples/minimal/`](../examples/minimal/) for the commented version.
 
 ## 2. Drawing
