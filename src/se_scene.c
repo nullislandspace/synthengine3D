@@ -6,6 +6,7 @@
 
 #include "se_config.h"      // DISPLAY_* + RENDER_* projection constants
 #include "se_direct565.h"   // direct_565_logical_index, direct_565_pack
+#include "esp_cache.h"      // esp_cache_msync (banded renderer)
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"  // esp_ptr_internal (depth-order gather buffers)
@@ -294,6 +295,34 @@ static inline int scene_index(int lx, int ly) {
 
 static void viewport_apply(void);
 
+// --- Raster target ----------------------------------------------------------
+//
+// Everything a raster pass writes to, and the columns and rows it may
+// touch. The passes below read the target only through s_rt, never the
+// frame-level s_fb / s_ds / s_dz / s_vp_*, so one frame can be drawn into
+// more than one target: scene_rasterize() points it at the whole frame,
+// and the banded renderer at one band of columns in internal SRAM at a
+// time (`off` then maps the frame index onto the band buffer).
+//
+// Kept in one struct so that a second core can later draw other bands at
+// the same time: that makes s_rt a per-worker context handed to the
+// passes, and the counters below per-worker too, summed at the end.
+typedef struct {
+    uint16_t* fb;      // colour; pixel i of the frame is fb[i - off]
+    uint32_t* ds;      // stamped depth, used when !dz_on
+    uint16_t* dz;      // plain 16-bit depth, 0 = infinitely far
+    bool      dz_on;
+    int       off;
+    int       vp_x0, vp_y0, vp_x1, vp_y1;   // inclusive, this frame's target pixels
+    int64_t   tri_px, tri_sp, ttri_px, ttri_sp;
+} raster_target_t;
+
+static raster_target_t s_rt;
+
+static inline int rt_index(int lx, int ly) {
+    return scene_index(lx, ly) - s_rt.off;
+}
+
 void scene_set_render_scale(int div) {
     s_div_next = div == 2 ? 2 : 1;
 }
@@ -472,14 +501,14 @@ void scene_vrun_body(int lx, int y_top, int y_bot,
                      float As, float Bs, float Cs, uint16_t packed, bool const d16) {
     uint16_t const frame = s_frame;
     uint32_t const fhi   = (uint32_t)frame << 16;   // stamp pre-shifted for the store
-    int const idx = scene_index(lx, y_top);
-    uint16_t* fp  = s_fb + idx;
-    uint32_t* dp  = s_ds + idx;
-    uint16_t* zp  = s_dz + idx;
+    int const idx = rt_index(lx, y_top);
+    uint16_t* fp  = s_rt.fb + idx;
+    uint32_t* dp  = s_rt.ds + idx;
+    uint16_t* zp  = s_rt.dz + idx;
     float     d   = As * (float)lx + Bs * (float)y_top + Cs;
     int       cnt = y_bot - y_top + 1;
-    s_stat_tri_px += cnt;
-    s_stat_tri_sp++;
+    s_rt.tri_px += cnt;
+    s_rt.tri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;                      // sub-pixel edge overshoot guard
@@ -506,11 +535,11 @@ void scene_vrun_body(int lx, int y_top, int y_bot,
 
 static inline void scene_vrun(int lx, int y_top, int y_bot,
                               float As, float Bs, float Cs, uint16_t packed) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (lx < s_rt.vp_x0 || lx > s_rt.vp_x1) return;
+    if (y_top < s_rt.vp_y0) y_top = s_rt.vp_y0;
+    if (y_bot > s_rt.vp_y1) y_bot = s_rt.vp_y1;
     if (y_top > y_bot) return;
-    if (s_dz_on) scene_vrun_body(lx, y_top, y_bot, As, Bs, Cs, packed, true);
+    if (s_rt.dz_on) scene_vrun_body(lx, y_top, y_bot, As, Bs, Cs, packed, true);
     else         scene_vrun_body(lx, y_top, y_bot, As, Bs, Cs, packed, false);
 }
 
@@ -542,7 +571,7 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     if (x2 < x0) { tx=x0; ty=y0; x0=x2; y0=y2; x2=tx; y2=ty; }
     if (x2 < x1) { tx=x1; ty=y1; x1=x2; y1=y2; x2=tx; y2=ty; }
 
-    if (x2 < (float)s_vp_x0 || x0 > (float)s_vp_x1) return;
+    if (x2 < (float)s_rt.vp_x0 || x0 > (float)s_rt.vp_x1) return;
     if (x2 - x0 < 1e-6f) return;
 
     float const dydx_02 = (y2 - y0) / (x2 - x0);
@@ -552,8 +581,8 @@ static void scene_raster_tri(scene_vtx_t a, scene_vtx_t b, scene_vtx_t c,
     int ix_start =     ceil_i(x0);
     int ix_split =     ceil_i(x1);
     int ix_endex = 1 + floor_i(x2);
-    if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
-    if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
+    if (ix_start < s_rt.vp_x0)      ix_start = s_rt.vp_x0;
+    if (ix_endex > s_rt.vp_x1 + 1)  ix_endex = s_rt.vp_x1 + 1;
     if (ix_split < ix_start)      ix_split = ix_start;
     if (ix_split > ix_endex)      ix_split = ix_endex;
 
@@ -620,10 +649,10 @@ static inline __attribute__((always_inline))
 void scene_vrun_tex_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
-    int const       idx   = scene_index(lx, y_top);
-    uint16_t*       fp    = s_fb + idx;
-    uint32_t*       dp    = s_ds + idx;
-    uint16_t*       zp    = s_dz + idx;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -634,8 +663,8 @@ void scene_vrun_tex_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, b
     uint32_t const  sh    = st->shade;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
-    s_stat_ttri_px += cnt;
-    s_stat_ttri_sp++;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -680,10 +709,10 @@ static inline __attribute__((always_inline))
 void scene_vrun_tex_tint_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
-    int const       idx   = scene_index(lx, y_top);
-    uint16_t*       fp    = s_fb + idx;
-    uint32_t*       dp    = s_ds + idx;
-    uint16_t*       zp    = s_dz + idx;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -694,8 +723,8 @@ void scene_vrun_tex_tint_body(int lx, int y_top, int y_bot, ttri_setup_t const* 
     uint32_t const  shrg  = st->shade, shb = st->shade_b;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
-    s_stat_ttri_px += cnt;
-    s_stat_ttri_sp++;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -733,10 +762,10 @@ static inline __attribute__((always_inline))
 void scene_vrun_tex_cutout_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
-    int const       idx   = scene_index(lx, y_top);
-    uint16_t*       fp    = s_fb + idx;
-    uint32_t*       dp    = s_ds + idx;
-    uint16_t*       zp    = s_dz + idx;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -747,8 +776,8 @@ void scene_vrun_tex_cutout_body(int lx, int y_top, int y_bot, ttri_setup_t const
     uint32_t const  sh    = st->shade;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
-    s_stat_ttri_px += cnt;
-    s_stat_ttri_sp++;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -785,10 +814,10 @@ static inline __attribute__((always_inline))
 void scene_vrun_tex_cutout_tint_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
     uint16_t const  frame = s_frame;
     uint32_t const  fhi   = (uint32_t)frame << 16;
-    int const       idx   = scene_index(lx, y_top);
-    uint16_t*       fp    = s_fb + idx;
-    uint32_t*       dp    = s_ds + idx;
-    uint16_t*       zp    = s_dz + idx;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
     float const     fx    = (float)lx, fy = (float)y_top;
     float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
     float           us    = st->Au * fx + st->Bu * fy + st->Cu;
@@ -799,8 +828,8 @@ void scene_vrun_tex_cutout_tint_body(int lx, int y_top, int y_bot, ttri_setup_t 
     uint32_t const  shrg  = st->shade, shb = st->shade_b;
     bool const      rev   = s_rev;
     int             cnt   = y_bot - y_top + 1;
-    s_stat_ttri_px += cnt;
-    s_stat_ttri_sp++;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
     while (cnt-- > 0) {
         int di = (int)d;
         if (di < 0) di = 0;
@@ -833,30 +862,30 @@ void scene_vrun_tex_cutout_tint_body(int lx, int y_top, int y_bot, ttri_setup_t 
 }
 
 static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (lx < s_rt.vp_x0 || lx > s_rt.vp_x1) return;
+    if (y_top < s_rt.vp_y0) y_top = s_rt.vp_y0;
+    if (y_bot > s_rt.vp_y1) y_bot = s_rt.vp_y1;
     if (y_top > y_bot) return;
     if (s_tint_on) {
-        if (s_dz_on) scene_vrun_tex_tint_body(lx, y_top, y_bot, st, true);
+        if (s_rt.dz_on) scene_vrun_tex_tint_body(lx, y_top, y_bot, st, true);
         else         scene_vrun_tex_tint_body(lx, y_top, y_bot, st, false);
         return;
     }
-    if (s_dz_on) scene_vrun_tex_body(lx, y_top, y_bot, st, true);
+    if (s_rt.dz_on) scene_vrun_tex_body(lx, y_top, y_bot, st, true);
     else         scene_vrun_tex_body(lx, y_top, y_bot, st, false);
 }
 
 static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
-    if (lx < s_vp_x0 || lx > s_vp_x1) return;
-    if (y_top < s_vp_y0) y_top = s_vp_y0;
-    if (y_bot > s_vp_y1) y_bot = s_vp_y1;
+    if (lx < s_rt.vp_x0 || lx > s_rt.vp_x1) return;
+    if (y_top < s_rt.vp_y0) y_top = s_rt.vp_y0;
+    if (y_bot > s_rt.vp_y1) y_bot = s_rt.vp_y1;
     if (y_top > y_bot) return;
     if (s_tint_on) {
-        if (s_dz_on) scene_vrun_tex_cutout_tint_body(lx, y_top, y_bot, st, true);
+        if (s_rt.dz_on) scene_vrun_tex_cutout_tint_body(lx, y_top, y_bot, st, true);
         else         scene_vrun_tex_cutout_tint_body(lx, y_top, y_bot, st, false);
         return;
     }
-    if (s_dz_on) scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, true);
+    if (s_rt.dz_on) scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, true);
     else         scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, false);
 }
 
@@ -900,7 +929,7 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     if (x2 < x0) { tx=x0; ty=y0; x0=x2; y0=y2; x2=tx; y2=ty; }
     if (x2 < x1) { tx=x1; ty=y1; x1=x2; y1=y2; x2=tx; y2=ty; }
 
-    if (x2 < (float)s_vp_x0 || x0 > (float)s_vp_x1) return;
+    if (x2 < (float)s_rt.vp_x0 || x0 > (float)s_rt.vp_x1) return;
     if (x2 - x0 < 1e-6f) return;
 
     float const dydx_02 = (y2 - y0) / (x2 - x0);
@@ -910,8 +939,8 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     int ix_start =     ceil_i(x0);
     int ix_split =     ceil_i(x1);
     int ix_endex = 1 + floor_i(x2);
-    if (ix_start < s_vp_x0)      ix_start = s_vp_x0;
-    if (ix_endex > s_vp_x1 + 1)  ix_endex = s_vp_x1 + 1;
+    if (ix_start < s_rt.vp_x0)      ix_start = s_rt.vp_x0;
+    if (ix_endex > s_rt.vp_x1 + 1)  ix_endex = s_rt.vp_x1 + 1;
     if (ix_split < ix_start)      ix_split = ix_start;
     if (ix_split > ix_endex)      ix_split = ix_endex;
 
@@ -971,16 +1000,16 @@ static void scene_raster_line(scene_vtx_t a, scene_vtx_t b, uint16_t packed) {
     int     const ptr_dx = (sx > 0) ? s_raw_stride : -s_raw_stride;
     int     const ptr_dy = (sy > 0) ? -1 : 1;
 
-    int const idx = scene_index(x0, y0);
-    uint16_t* fp  = s_fb + idx;
-    uint32_t* dp  = s_ds + idx;
-    uint16_t* zp  = s_dz + idx;
-    bool const d16 = s_dz_on;
+    int const idx = rt_index(x0, y0);
+    uint16_t* fp  = s_rt.fb + idx;
+    uint32_t* dp  = s_rt.ds + idx;
+    uint16_t* zp  = s_rt.dz + idx;
+    bool const d16 = s_rt.dz_on;
     int       lx  = x0;
     int       ly  = y0;
 
     while (1) {
-        if (lx >= s_vp_x0 && lx <= s_vp_x1 && ly >= s_vp_y0 && ly <= s_vp_y1) {
+        if (lx >= s_rt.vp_x0 && lx <= s_rt.vp_x1 && ly >= s_rt.vp_y0 && ly <= s_rt.vp_y1) {
             int di = (int)d;
             if (di < 0) di = 0;
             uint16_t const stored =
@@ -1255,20 +1284,22 @@ void scene_point(float x, float y, float z, uint32_t argb) {
 
 // Depth-tested, never depth-writing single pixels (as the edges, without
 // their bias: a point is not drawn over a face it belongs to).
+static inline void scene_raster_point(se_pt_t const* pt) {
+    int const x = (int)lroundf(pt->v.sx), y = (int)lroundf(pt->v.sy);
+    if (x < s_rt.vp_x0 || x > s_rt.vp_x1 || y < s_rt.vp_y0 || y > s_rt.vp_y1) return;
+    int const      idx    = rt_index(x, y);
+    uint16_t const stored =
+        s_rt.dz_on ? s_rt.dz[idx] : ((uint16_t)(s_rt.ds[idx] >> 16) == s_frame) ? (uint16_t)s_rt.ds[idx] : 0;
+    int di = (int)(pt->v.w * SCENE_DEPTH_SCALE);
+    if (di < 0) di = 0;
+    if ((uint16_t)di >= stored) s_rt.fb[idx] = pt->packed;
+}
+
 void se_scene_raster_points(void) {
     if (s_pts == NULL || s_fb == NULL || s_ds == NULL) return;
-    int64_t const  t0    = esp_timer_get_time();
-    uint16_t const frame = s_frame;
+    int64_t const t0 = esp_timer_get_time();
     for (int i = 0; i < s_pt_n; i++) {
-        se_pt_t const* pt = &s_pts[i];
-        int const      x  = (int)lroundf(pt->v.sx), y = (int)lroundf(pt->v.sy);
-        if (x < s_vp_x0 || x > s_vp_x1 || y < s_vp_y0 || y > s_vp_y1) continue;
-        int const      idx    = scene_index(x, y);
-        uint16_t const stored =
-            s_dz_on ? s_dz[idx] : ((uint16_t)(s_ds[idx] >> 16) == frame) ? (uint16_t)s_ds[idx] : 0;
-        int            di     = (int)(pt->v.w * SCENE_DEPTH_SCALE);
-        if (di < 0) di = 0;
-        if ((uint16_t)di >= stored) s_fb[idx] = pt->packed;
+        scene_raster_point(&s_pts[i]);
     }
     s_stat_pt_us = esp_timer_get_time() - t0;
 }
@@ -1556,11 +1587,236 @@ static void zbuf_rasterize(void* user) {
 }
 
 // =====================================================================
+//  Built-in renderer #2 -- SE_RENDER_BANDED (the z-buffer, one band at a time)
+// ---------------------------------------------------------------------
+//  The same passes as the z-buffer renderer, run once per vertical band
+//  of SE_SCENE_BAND_W logical columns. A logical column is one raw row of
+//  the rotated framebuffer, so a band is one contiguous block of it: it
+//  is copied into a colour buffer in internal SRAM (whatever the frame
+//  already holds there, e.g. the backdrop), drawn against a plain 16-bit
+//  depth buffer in internal SRAM, and copied back. The per-pixel depth
+//  test and the pixel writes then never touch PSRAM; PSRAM sees one
+//  sequential read and one sequential write per band instead. Bands no
+//  primitive touches are skipped outright.
+//
+//  The image is the z-buffer renderer's, pixel for pixel: same passes in
+//  the same order, same depth encoding, and an empty depth cell reads 0
+//  in both.
+//
+//  prepare() works out which bands each primitive spans, so a band only
+//  sets up the primitives it contains. A primitive spanning several bands
+//  is set up once per band: that is the price. rasterize() only reads
+//  those spans and the lists, and draws each band through its own raster
+//  target (s_rt), which is what lets a second core take bands later: it
+//  needs its own band buffers and target, nothing else.
+// =====================================================================
+
+#define BAND_W     SE_SCENE_BAND_W
+#define BAND_MAX_N ((DISPLAY_LOG_W + BAND_W - 1) / BAND_W)
+_Static_assert(BAND_W >= 4 && BAND_MAX_N <= 255, "SE_SCENE_BAND_W: band numbers are 8-bit");
+
+// The first and last band a primitive touches; b0 > b1 when none.
+typedef struct {
+    uint8_t b0, b1;
+} band_span_t;
+
+#define BAND_PIXELS (BAND_W * DISPLAY_RAW_STRIDE)   // a band at full resolution (the larger)
+
+static uint16_t*    s_band_fb     = NULL;
+static uint16_t*    s_band_dz     = NULL;
+static band_span_t* s_band_tri    = NULL;   // SE_SCENE_TRI_CAP
+static band_span_t* s_band_ttri   = NULL;   // SE_SCENE_TEXTURED_TRI_CAP
+static band_span_t* s_band_line   = NULL;   // SE_SCENE_LINE_CAP
+static band_span_t* s_band_pt     = NULL;   // SE_SCENE_POINT_CAP
+static bool         s_band_used[BAND_MAX_N];
+static bool         s_band_ok     = false;  // spans prepared, buffers there
+static uint16_t     s_band_frame  = 0;      // ... for this frame (s_frame)
+static bool         s_band_failed = false;  // allocation failed; logged once, not retried
+
+// The band buffers must be internal SRAM, or banding buys nothing. The
+// spans go to PSRAM: each band reads them once, in order, which the cache
+// serves well, and internal SRAM is what the band buffers need.
+static void* band_alloc_span(size_t n) {
+    return heap_caps_malloc(n * sizeof(band_span_t), MALLOC_CAP_SPIRAM);
+}
+
+static bool band_alloc(void) {
+    if (s_band_fb != NULL) return true;
+    if (s_band_failed) return false;
+    size_t const bytes = (size_t)BAND_PIXELS * sizeof(uint16_t);
+    uint16_t*    fb    = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL);
+    uint16_t*    dz    = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL);
+    s_band_tri         = band_alloc_span(SE_SCENE_TRI_CAP);
+    s_band_ttri        = band_alloc_span(SE_SCENE_TEXTURED_TRI_CAP);
+    s_band_line        = band_alloc_span(SE_SCENE_LINE_CAP);
+    s_band_pt          = band_alloc_span(SE_SCENE_POINT_CAP);
+    if (fb == NULL || dz == NULL || !s_band_tri || !s_band_ttri || !s_band_line || !s_band_pt) {
+        ESP_LOGE(TAG, "banded renderer: no room for its buffers (2 x %uKB internal, largest free %uKB) -- using the z-buffer",
+                 (unsigned)(bytes / 1024), (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+        heap_caps_free(fb);
+        heap_caps_free(dz);
+        heap_caps_free(s_band_tri);
+        heap_caps_free(s_band_ttri);
+        heap_caps_free(s_band_line);
+        heap_caps_free(s_band_pt);
+        s_band_tri = s_band_ttri = s_band_line = s_band_pt = NULL;
+        s_band_failed = true;
+        return false;
+    }
+    s_band_fb = fb;
+    s_band_dz = dz;
+    ESP_LOGI(TAG, "banded renderer: %d-column bands, 2 x %uKB internal", BAND_W, (unsigned)(bytes / 1024));
+    return true;
+}
+
+// The bands covering screen columns [xmin, xmax], clipped to the frame's
+// viewport. Conservative: a band a primitive only grazes is drawn and
+// finds nothing, which costs time but never a pixel.
+static band_span_t band_span(float xmin, float xmax) {
+    band_span_t const none = {1, 0};
+    if (!(xmax >= (float)s_vp_x0) || !(xmin <= (float)s_vp_x1)) return none;   // also catches NaN
+    int c0 = xmin <= (float)s_vp_x0 ? s_vp_x0 : floor_i(xmin);
+    int c1 = xmax >= (float)s_vp_x1 ? s_vp_x1 : ceil_i(xmax);
+    if (c0 < s_vp_x0) c0 = s_vp_x0;
+    if (c1 > s_vp_x1) c1 = s_vp_x1;
+    if (c0 > c1) return none;
+    band_span_t const sp = {(uint8_t)(c0 / BAND_W), (uint8_t)(c1 / BAND_W)};
+    for (int b = sp.b0; b <= sp.b1; b++) s_band_used[b] = true;
+    return sp;
+}
+
+static inline float min3f(float a, float b, float c) {
+    float const m = a < b ? a : b;
+    return m < c ? m : c;
+}
+
+static inline float max3f(float a, float b, float c) {
+    float const m = a > b ? a : b;
+    return m > c ? m : c;
+}
+
+static void banded_prepare(void* user) {
+    (void)user;
+    s_band_ok    = band_alloc();
+    s_band_frame = s_frame;
+    if (!s_band_ok) return;
+    memset(s_band_used, 0, sizeof(s_band_used));
+    for (int i = 0; i < s_tri_n; i++) {
+        scene_vtx_t const* v = s_tris[i].v;
+        s_band_tri[i]        = band_span(min3f(v[0].sx, v[1].sx, v[2].sx), max3f(v[0].sx, v[1].sx, v[2].sx));
+    }
+    for (int i = 0; i < s_ttri_n; i++) {
+        se_tvtx_t const* v = s_ttris[i].v;
+        s_band_ttri[i]     = band_span(min3f(v[0].sx, v[1].sx, v[2].sx), max3f(v[0].sx, v[1].sx, v[2].sx));
+    }
+    // Edges and points are placed by rounding, as their rasterizers do.
+    for (int i = 0; i < s_line_n; i++) {
+        float const a = (float)lroundf(s_lines[i].v[0].sx), b = (float)lroundf(s_lines[i].v[1].sx);
+        s_band_line[i] = band_span(a < b ? a : b, a < b ? b : a);
+    }
+    for (int i = 0; i < s_pt_n; i++) {
+        float const x = (float)lroundf(s_pts[i].v.sx);
+        s_band_pt[i]  = band_span(x, x);
+    }
+}
+
+typedef struct {
+    int64_t tri_us, ttri_us, line_us, pt_us;
+} band_times_t;
+
+static inline bool band_has(band_span_t sp, int b) {
+    return b >= sp.b0 && b <= sp.b1;
+}
+
+// Draw band `b`, columns [x0, x1] of the frame target `frame`, through
+// the band buffers. Uses nothing a second core could not have its own of:
+// the band buffers, s_rt, and the read-only lists and spans.
+static void band_draw(int b, int x0, int x1, raster_target_t const* frame, band_times_t* t) {
+    int const       off   = x0 * s_raw_stride;   // raw rows x0..x1 are contiguous
+    size_t const    bytes = (size_t)(x1 - x0 + 1) * s_raw_stride * sizeof(uint16_t);
+    uint16_t* const src   = frame->fb + off;
+
+    // The band is written back whole, so what the frame holds there comes
+    // in first. Write back and drop its cache lines before reading: the
+    // backdrop may have been written by DMA (the PPA) behind the cache,
+    // and pixels the CPU drew may still be dirty in it.
+    esp_cache_msync(src, bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                                    ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    memcpy(s_band_fb, src, bytes);
+    memset(s_band_dz, 0, bytes);
+
+    raster_target_t const acc = s_rt;   // counters so far
+    s_rt = (raster_target_t){
+        .fb = s_band_fb, .ds = frame->ds, .dz = s_band_dz, .dz_on = true, .off = off,
+        .vp_x0 = x0, .vp_y0 = frame->vp_y0, .vp_x1 = x1, .vp_y1 = frame->vp_y1,
+        .tri_px = acc.tri_px, .tri_sp = acc.tri_sp, .ttri_px = acc.ttri_px, .ttri_sp = acc.ttri_sp,
+    };
+
+    // The z-buffer renderer's passes and order (zbuf_rasterize).
+    int64_t const t0 = esp_timer_get_time();
+    for (int i = 0; i < s_tri_n; i++) {
+        if (band_has(s_band_tri[i], b))
+            scene_raster_tri(s_tris[i].v[0], s_tris[i].v[1], s_tris[i].v[2], s_tris[i].packed);
+    }
+    int64_t const t1 = esp_timer_get_time();
+    for (int i = 0; i < s_ttri_n; i++) {
+        if (band_has(s_band_ttri[i], b)) scene_raster_ttri(&s_ttris[i]);
+    }
+    int64_t const t2 = esp_timer_get_time();
+    for (int i = 0; i < s_line_n; i++) {
+        if (band_has(s_band_line[i], b)) scene_raster_line(s_lines[i].v[0], s_lines[i].v[1], s_lines[i].packed);
+    }
+    int64_t const t3 = esp_timer_get_time();
+    for (int i = 0; i < s_pt_n; i++) {
+        if (band_has(s_band_pt[i], b)) scene_raster_point(&s_pts[i]);
+    }
+    int64_t const t4 = esp_timer_get_time();
+    t->tri_us  += t1 - t0;
+    t->ttri_us += t2 - t1;
+    t->line_us += t3 - t2;
+    t->pt_us   += t4 - t3;
+
+    memcpy(src, s_band_fb, bytes);
+}
+
+static void banded_rasterize(void* user) {
+    // Spans from another frame (prepared with another renderer) would
+    // put primitives in the wrong bands.
+    if (!s_band_ok || s_band_frame != s_frame) {
+        zbuf_rasterize(user);
+        return;
+    }
+    raster_target_t const frame = s_rt;
+    band_times_t          t     = {0};
+    int const             nb    = (DISPLAY_LOG_W / s_div + BAND_W - 1) / BAND_W;
+    for (int b = 0; b < nb; b++) {
+        if (!s_band_used[b]) continue;
+        int x0 = b * BAND_W, x1 = x0 + BAND_W - 1;
+        if (x0 < frame.vp_x0) x0 = frame.vp_x0;
+        if (x1 > frame.vp_x1) x1 = frame.vp_x1;
+        if (x0 > x1) continue;
+        band_draw(b, x0, x1, &frame, &t);
+    }
+    // Back to the frame target, keeping the counters the bands added up.
+    raster_target_t const acc = s_rt;
+    s_rt         = frame;
+    s_rt.tri_px  = acc.tri_px;
+    s_rt.tri_sp  = acc.tri_sp;
+    s_rt.ttri_px = acc.ttri_px;
+    s_rt.ttri_sp = acc.ttri_sp;
+    s_stat_tri_us  = t.tri_us;
+    s_stat_ttri_us = t.ttri_us;
+    s_stat_line_us = t.line_us;
+    s_stat_pt_us   = t.pt_us;
+}
+
+// =====================================================================
 //  Renderer table + dispatch
 // =====================================================================
 
 static se_renderer_t s_renderers[SE_RENDER_MAX] = {
-    [SE_RENDER_ZBUFFER] = { "zbuffer", zbuf_prepare, zbuf_rasterize, NULL },
+    [SE_RENDER_ZBUFFER] = { "zbuffer", zbuf_prepare,    zbuf_rasterize,    NULL },
+    [SE_RENDER_BANDED]  = { "banded",  banded_prepare,  banded_rasterize,  NULL },
 };
 static int s_renderer_n = SE_RENDER_BUILTIN_COUNT;
 
@@ -1630,10 +1886,12 @@ void scene_rasterize(se_render_mode_t mode) {
     s_stat_line_n = s_line_n;
     s_stat_ttri_n  = s_ttri_n;
     s_stat_ttri_us = 0;   // stays 0 if a custom renderer skips the textured pass
-    s_stat_tri_px  = 0;
-    s_stat_ttri_px = 0;
-    s_stat_tri_sp  = 0;
-    s_stat_ttri_sp = 0;
+    // The whole frame is the target, unless a renderer draws into others
+    // (the banded one); either way the counters are read back from it.
+    s_rt = (raster_target_t){
+        .fb = s_fb, .ds = s_ds, .dz = s_dz, .dz_on = s_dz_on, .off = 0,
+        .vp_x0 = s_vp_x0, .vp_y0 = s_vp_y0, .vp_x1 = s_vp_x1, .vp_y1 = s_vp_y1,
+    };
     s_stat_tri_drop  = 0;
     s_stat_ttri_drop = 0;
     s_stat_pt_n    = s_pt_n;
@@ -1641,6 +1899,10 @@ void scene_rasterize(se_render_mode_t mode) {
 
     se_renderer_t const* const r = renderer_for(mode);
     r->rasterize(r->user);
+    s_stat_tri_px  = s_rt.tri_px;
+    s_stat_ttri_px = s_rt.ttri_px;
+    s_stat_tri_sp  = s_rt.tri_sp;
+    s_stat_ttri_sp = s_rt.ttri_sp;
 
     s_tri_n  = 0;
     s_line_n = 0;

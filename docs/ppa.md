@@ -134,20 +134,22 @@ Simpler than it looks, because of *who writes what*:
   then *reads* (a screenshot or a video encoder reading the upscaled
   framebuffer), wait for the job and call **`se_ppa_buf_invalidate`** so the
   reads come from PSRAM, not from stale cache lines.
-- **The framebuffer** needs no per-frame flush or invalidate. PPA-vs-PPA
+- **The framebuffer** needs no per-frame flush or invalidate from the game:
+  the engine writes each finished frame back and drops it from the cache when
+  it flips it, so the buffer holds no cached lines when it is drawn into
+  again. (It used to rely on the frame's working set evicting them, which
+  stopped being certain once depth moved to internal SRAM.) PPA-vs-PPA
   ordering is handled by the waits, not cache ops (DMA peers are coherent with
   PSRAM). The subtle case is **PPA writes a region, then the CPU draws over
   it** — the sky backdrop with the 3D scene on top, or (in Race the Synth) the
   PPA floor base with CPU grid lines + shadow quads on top. That's safe without
   an explicit invalidate for two reasons: (1) the CPU *overwrites* PPA output,
   it never reads it back and uses it, and (2) on a write the CPU read-allocates
-  the cache line, and it always gets the fresh PPA pixels because this back
-  buffer's prior-frame cache lines were already evicted — the per-frame working
-  set (the framebuffer alone is 768 KB, plus the depth/stamp plane) far exceeds
-  the L2 cache, so a full alternate-buffer frame flushes and evicts everything
-  between two uses of the same buffer. An app whose per-frame working set fits
-  in L2, or that reads PPA output back to *use* it, needs the explicit calls
-  above.
+  the cache line, and it always gets the fresh PPA pixels because the flip
+  dropped this buffer's lines from the cache. `SE_RENDER_BANDED` does read
+  the backdrop back (it copies each band into SRAM first); it writes back and
+  drops the band's lines itself before it does. An app that reads PPA output
+  back to *use* it needs the explicit calls above.
 
 ## Threading
 

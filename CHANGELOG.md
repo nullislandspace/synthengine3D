@@ -19,13 +19,53 @@ A 2.1 game builds unchanged unless it selects `SE_RENDER_RAYCAST` (see
 below). Still unreleased and still being worked on, so it collects
 everything of this round rather than taking a number per change.
 
+### Added — `SE_RENDER_BANDED`, the z-buffer drawn band by band in internal SRAM
+
+```c
+scene_prepare(SE_RENDER_BANDED);
+scene_rasterize(SE_RENDER_BANDED);
+```
+
+A second built-in renderer, to be measured against the z-buffer; one of
+the two will go. It runs the z-buffer renderer's passes one vertical band
+of `SE_SCENE_BAND_W` logical columns (default 32) at a time. A logical
+column is one raw row of the rotated framebuffer, so a band is one
+contiguous block: it is copied into a colour buffer in internal SRAM,
+drawn against a plain 16-bit depth buffer there, and copied back. The
+per-pixel depth test and pixel writes never touch PSRAM, and bands no
+primitive touches are skipped. `scene_prepare()` records which bands each
+primitive spans; a triangle spanning N bands is set up N times.
+
+The image is the z-buffer's, pixel for pixel: a host check drawing random
+scenes both ways (full and quarter resolution, viewports, cull and order,
+lighting, tint, cut-out textures) found no difference.
+
+It needs 2 × `SE_SCENE_BAND_W` × 480 × 2 bytes of internal SRAM (60 KB at
+the default), allocated on first use; without it, it logs once and renders
+as `SE_RENDER_ZBUFFER`. `SE_RENDER_BUILTIN_COUNT` goes back to 2, so
+registered renderers get handles from 2 again.
+
+Inside, the raster passes now draw through one raster target (colour,
+depth, index offset, clip rectangle, fill counters) instead of the
+frame-level buffers, which is what lets a band be a target. It is also
+the step towards drawing bands on the second core: each core then needs
+its own target and band buffers, and nothing else.
+
+### Changed — the flip drops the frame from the cache
+
+The present now writes the finished frame back **and invalidates it**
+before flipping. The engine used to rely on each frame's working set
+evicting a framebuffer's cache lines before the buffer was drawn into
+again — with depth in internal SRAM that is no longer certain, and a
+stale line that a partial CPU write (a HUD glyph) lands in would write
+old pixels back over the PPA's new backdrop.
+
 ### Removed — the raycast renderer (a deliberate exception to MAJOR)
 
 `SE_RENDER_RAYCAST` and the tiled primary-ray renderer behind it are
 gone; the z-buffer is the only built-in renderer. `SE_RENDER_BUILTIN_COUNT`
-drops from 2 to 1, so `se_renderer_register()` now hands out handles
-from 1. Registered handles were always opaque, so only a game that
-hard-coded one would notice.
+dropped from 2 to 1 with it, and is back at 2 now that `SE_RENDER_BANDED`
+takes the slot (above), so registered handles still start at 2.
 
 Removing a public symbol is a MAJOR change by the rules above. This one
 is recorded under 2.2 on purpose: no game renders with the raycaster, and

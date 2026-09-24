@@ -29,6 +29,7 @@
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"   // event/key enums + types
+#include "esp_cache.h"         // esp_cache_msync
 #include "esp_lcd_mipi_dsi.h"   // esp_lcd_dpi_panel_get_frame_buffer
 #include "esp_lcd_panel_ops.h"  // esp_lcd_panel_draw_bitmap
 #include "gl_input.h"    // gl_input_get_queue (USB + native merged)
@@ -193,7 +194,17 @@ static void se_present(void) {
     int const shown = s_fb_selected;
     int64_t const t1 = esp_timer_get_time();
 
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, (int)s_di.width, (int)s_di.height, pax_buf_get_pixels(s_fb));
+    // Write the frame back AND drop it from the cache (draw_bitmap only
+    // writes back). The buffer is drawn into again two frames on, after
+    // the PPA may have filled it by DMA behind the cache: a line still
+    // cached from this frame would then hold old pixels, and a partial
+    // CPU write into it (a HUD glyph) would write them back over the new
+    // backdrop. This used to be left to the frame's working set evicting
+    // everything; with depth in internal SRAM (SE_RENDER_BANDED) it may
+    // not. draw_bitmap's own write-back then finds nothing to do.
+    void* const px = pax_buf_get_pixels_rw(s_fb);
+    esp_cache_msync(px, pax_buf_get_size(s_fb), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, (int)s_di.width, (int)s_di.height, px);
     s_fb_selected = s_fb_back;
     // The display reads `shown` or the buffer just selected; the next back
     // buffer is the third one.

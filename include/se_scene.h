@@ -50,21 +50,33 @@
 
 // Which algorithm scene_render() uses to resolve the frame. Selected per
 // call, so a game can switch renderers live (between frames) or pick a
-// different one per screen.
+// different one per screen. Both built-ins draw the same image, pixel for
+// pixel; they differ only in where the per-pixel work happens.
 //
-//   SE_RENDER_ZBUFFER  the built-in. Walks triangles, and for each one
-//                      walks the pixels it covers, depth-testing per
-//                      pixel. Cost scales with the summed triangle AREA,
-//                      i.e. covered pixels x overdraw: a pixel under N
-//                      overlapping triangles is visited N times.
+//   SE_RENDER_ZBUFFER  walks triangles, and for each one walks the pixels
+//                      it covers, depth-testing per pixel. Cost scales
+//                      with the summed triangle AREA, i.e. covered pixels
+//                      x overdraw. The depth plane (and the framebuffer)
+//                      are in PSRAM at full resolution.
+//
+//   SE_RENDER_BANDED   the same, one vertical band of SE_SCENE_BAND_W
+//                      columns at a time (se_config.h), each drawn into
+//                      colour and depth buffers in internal SRAM and
+//                      copied back: the per-pixel work never touches
+//                      PSRAM. A triangle spanning several bands is set up
+//                      once per band. Needs ~60 KB of internal SRAM,
+//                      allocated on first use; without it, it renders as
+//                      SE_RENDER_ZBUFFER. Being measured against the
+//                      z-buffer: one of the two will go.
 //
 // Values from SE_RENDER_BUILTIN_COUNT up are handles returned by
 // se_renderer_register() (see below).
 typedef enum {
     SE_RENDER_ZBUFFER = 0,           // per-pixel reciprocal-z depth test
+    SE_RENDER_BANDED  = 1,           // the same, band by band in internal SRAM
     SE_RENDER_DEFAULT = SE_RENDER_ZBUFFER,
-    SE_RENDER_BUILTIN_COUNT = 1,     // first handle se_renderer_register() hands out
-    SE_RENDER_MAX = 8,               // renderer table size (built-in + custom)
+    SE_RENDER_BUILTIN_COUNT = 2,     // first handle se_renderer_register() hands out
+    SE_RENDER_MAX = 8,               // renderer table size (built-ins + custom)
 } se_render_mode_t;
 
 // Allocate the depth buffer, frame-stamp plane and the deferred triangle
@@ -391,8 +403,8 @@ se_scene_options_t scene_get_options(void);
 
 // --- Pluggable renderers ---------------------------------------------
 //
-// The z-buffer is just the renderer the engine ships with; the pipeline
-// itself is a seam. A game can register its own renderer
+// The built-ins are just the renderers the engine ships with; the
+// pipeline itself is a seam. A game can register its own renderer
 // and select it exactly like a built-in, which is the point of the
 // engine being reusable: a different game with different geometry (or a
 // different visual style -- cel shading, dithering, a depth-cued fog
@@ -519,12 +531,12 @@ se_geometry_t se_scene_geometry(void);
 // path, for a custom renderer that has no texturing of its own. Call it
 // from the renderer's rasterize() AFTER the flat triangles have written
 // their depth and BEFORE the edges, which is the order the built-in
-// renderer uses. It depth-tests against, and writes, the shared depth
+// renderers use. It depth-tests against, and writes, the shared depth
 // plane, so it composes with whatever the renderer drew.
 void se_scene_raster_textured(void);
 
 // Draw this frame's points with the engine's own point pass, for a custom
 // renderer. Call it from rasterize() last, after the edges, as the
-// built-in renderer does. It depth-tests against the shared depth plane
+// built-in renderers do. It depth-tests against the shared depth plane
 // but never writes it.
 void se_scene_raster_points(void);
