@@ -10,7 +10,7 @@ network, no version of the data that might have moved on.
 The engine has always drawn text with it. `src/internal/hershey.h` holds the 95
 ASCII glyphs of the *roman simplex* face as `simplex[95][112]`, and that table
 is part of the public API (`se_text.h`) — a game may draw its own strokes from
-it, and CraftMiner's sibling does. **Nothing here touches it.**
+it, and SynthMiner's sibling does. **Nothing here touches it.**
 
 `make_hershey_ext.py` generates `src/internal/hershey_ext.h`, which is
 everything a Latin-1 or Cyrillic UI needs on top of those 95:
@@ -135,7 +135,7 @@ badge alike, so a gap is something you see rather than something you lose.
 4. **Run the script again, then the proof sheet**, and look at the new letters
    at 26 px and at 60. A stroke font hides nothing: if it is wrong, it looks
    wrong.
-5. **Rebuild the game.** CraftMiner's `make check` has its own `langcheck`,
+5. **Rebuild the game.** SynthMiner's `make check` has its own `langcheck`,
    which reads `lang/*.txt` and fails on any character this font cannot draw —
    the same guarantee from the other end.
 

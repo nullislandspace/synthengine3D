@@ -13,6 +13,12 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
+The game this engine is measured in was called **CraftMiner** until
+2026-09-25 and is called **SynthMiner** now. Entries below name it the
+new way throughout, including entries written before the rename: the
+measurements are the same measurements, and a name nobody can look up
+helps no one. Nothing in the engine changed for it.
+
 ## [2.2] — 2026-09-25
 
 A 2.1 game builds unchanged unless it selects `SE_RENDER_RAYCAST` (see
@@ -31,8 +37,8 @@ by a host check over 1000 random scenes (full and quarter resolution,
 viewports, cull and order, lighting, tint, cut-out textures) that also
 caught a deliberately broken copy.
 
-It was removed because it lost where it mattered. Measured in CraftMiner
-over a fixed 40-second flight across five biomes (`claudeplans/craftminer.md`,
+It was removed because it lost where it mattered. Measured in SynthMiner
+over a fixed 40-second flight across five biomes (`claudeplans/synthminer.md`,
 G6):
 
 | | fps | rasterize |
@@ -115,7 +121,7 @@ The engine now draws straight into the driver's buffers, three of them,
 and a present only selects the finished one for the next refresh. Three,
 not two: with two, every frame would wait for the refresh that frees
 the other buffer, on average half a refresh (8 ms at 60 Hz), about 10%
-of a CraftMiner frame. With three, the display reads one, one waits for
+of a SynthMiner frame. With three, the display reads one, one waits for
 the refresh, and the game draws into the third, so a game slower than
 60 Hz never waits. A faster one waits for the refresh before flipping,
 rather than drawing frames that are never shown. PSRAM use is unchanged
@@ -192,7 +198,7 @@ instantaneous, so a 35 ms click registered against a cold amp is over
 before the speaker is listening. The audio is mixed and written
 perfectly and is simply never heard.
 
-CraftMiner met this as "the tool sounds only play when the music is
+SynthMiner met this as "the tool sounds only play when the music is
 on", which is exactly what it looks like from the outside: a game with
 a music source installed keeps the mixer busy every chunk (a source
 rendering silence still counts as active), so the amplifier never
@@ -241,7 +247,7 @@ refuses to run unless the ASCII it regenerates matches the committed table and
 every letter of every alphabet it lists has a glyph, so support is per language
 rather than per string. `tools/hershey/README.md` says how to add one.
 
-The alphabets covered are the 32 CraftMiner ships: every language written in
+The alphabets covered are the 32 SynthMiner ships: every language written in
 Latin, Greek or Cyrillic that Europe uses, Turkish included. That needed
 sixteen accents (the usual five, plus caron, breve, double acute, macron, dot
 above, ogonek and comma below), Greek from Hershey's greek SIMPLEX face --
@@ -260,7 +266,7 @@ and an index, as it always did.
 frames drawn at `scene_set_render_scale(2)` depth-test against a plain 16-bit
 plane in internal SRAM (188 KB, cleared at `scene_begin()`) instead of the
 stamped PSRAM plane. It is allocated before the geometry lists, so the lists
-that no longer fit fall back to PSRAM. In CraftMiner it cut the per-pixel cost
+that no longer fit fall back to PSRAM. In SynthMiner it cut the per-pixel cost
 by about 30% (flat 178 -> 122 ns, textured ~200 -> ~150 ns). Full resolution
 is unchanged.
 
@@ -276,7 +282,7 @@ radix sorted and the records gathered once into a second buffer, which then
 swaps places with the list. The order is the same to within 1 part in 128 of
 the depth sum; ties never change the image. Costs 8 bytes of internal SRAM per
 triangle of the larger list's cap, plus one more list-sized buffer in the list's own
-memory; falls back to qsort without them. Far view prep time in CraftMiner:
+memory; falls back to qsort without them. Far view prep time in SynthMiner:
 17.3 -> 10.5 ms with the lists in PSRAM. The list caps must stay at or below 65536
 (a static assert).
 
@@ -285,7 +291,7 @@ memory; falls back to qsort without them. Far view prep time in CraftMiner:
 A triangle arriving at a full list with no vertex behind the near plane -- by
 far the common case -- was dropped by an early return that did not count it;
 only drops during near-plane clipping were counted. So a game overflowing the
-lists every frame saw a drop count of zero. Found in CraftMiner, where half
+lists every frame saw a drop count of zero. Found in SynthMiner, where half
 the nearby terrain was vanishing with no warning in the log. Both lists now
 count every drop.
 
@@ -319,13 +325,13 @@ count every drop.
   counts over all rows and `se_menu_input` is unchanged. 0 (what a 2.0 game's
   initialisers leave it) draws every row, as before. The field is appended to
   the end of the struct, so every existing designated initialiser still builds.
-  Written for CraftMiner's Controls menu, 23 rows in a panel that holds seven.
+  Written for SynthMiner's Controls menu, 23 rows in a panel that holds seven.
 
 ### Changed — `se_ui_capture_key()` binds the cursor keys (2026-09-22)
 
 It refused every escaped scancode (0xE0xx) and mapped only F1-F12 from the
 navigation channel, so the arrow keys -- the grey block generally -- could not
-be captured at all. A game that shipped an arrow key as a default (CraftMiner's
+be captured at all. A game that shipped an arrow key as a default (SynthMiner's
 look keys) could never have it bound back once a player changed it. Now the
 escaped grey keys bind as their scancodes, and a keyboard that sends the cursor
 keys, Home/End or Page Up/Down only as navigation events binds the same
@@ -335,7 +341,7 @@ game gets this by rebuilding, and a binding it already stores is unaffected.
 
 ### Changed — the rasterizer is faster, and says why (2026-09-21)
 
-Measured in CraftMiner on the badge, over a 20-second flight across streamed
+Measured in SynthMiner on the badge, over a 20-second flight across streamed
 voxel terrain. Nothing about the public API changes except one addition below;
 a game gets this by rebuilding.
 
@@ -370,7 +376,7 @@ pixels in a span to begin with.
   full — the only sane thing a fixed list can do — but they did it without a
   word, and the drop is in *submission order*, so what disappears is whatever
   the game happened to submit last: a corner of the world, a chunk, half a
-  title screen. That reads as a bug in the game, and it cost CraftMiner two
+  title screen. That reads as a bug in the game, and it cost SynthMiner two
   debugging sessions before it was made visible.
 
   `scene_drop_stats(int* tris, int* ttris)` reports what this frame's lists had

@@ -67,7 +67,7 @@
 // already in SRAM; its band buffers could not be widened past 32 columns
 // on a P4 (internal SRAM is too fragmented for two 60 KB blocks), so the
 // gap could not be closed, and it cost 60 KB that scarcer things want.
-// See the CHANGELOG, and CraftMiner's claudeplans/craftminer.md G6 for
+// See the CHANGELOG, and SynthMiner's claudeplans/synthminer.md G6 for
 // the measurements.
 //
 // Values from SE_RENDER_BUILTIN_COUNT up are handles returned by

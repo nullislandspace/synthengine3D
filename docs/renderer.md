@@ -319,8 +319,8 @@ could ever return.
 vertical band of columns at a time, each band copied into internal SRAM, drawn
 against a 16-bit depth buffer there, and copied back — so the per-pixel work
 never touched PSRAM. It drew the same image, proved over 1000 random scenes on
-the host. Measured in CraftMiner over a fixed 40-second flight
-(`claudeplans/craftminer.md`, G6):
+the host. Measured in SynthMiner over a fixed 40-second flight
+(`claudeplans/synthminer.md`, G6):
 
 | | fps | rasterize |
 |---|---|---|

@@ -125,7 +125,7 @@ static inline bool hershey_ext_glyph(uint32_t cp, hershey_glyph_t* g) {
 // Everything: ASCII, the folded characters, the ext glyphs, and the
 // composed ones. False for a codepoint this font cannot draw -- the
 // renderers then draw an empty box in its place, and the game's own
-// checks are what stop such a character reaching a player (CraftMiner's
+// checks are what stop such a character reaching a player (SynthMiner's
 // `langcheck`, for one).
 static inline bool hershey_glyph(uint32_t cp, hershey_glyph_t* g) {
     if (hershey_ascii_glyph(cp, g)) return true;
