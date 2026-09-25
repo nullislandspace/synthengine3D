@@ -50,8 +50,7 @@
 
 // Which algorithm scene_render() uses to resolve the frame. Selected per
 // call, so a game can switch renderers live (between frames) or pick a
-// different one per screen. Both built-ins draw the same image, pixel for
-// pixel; they differ only in where the per-pixel work happens.
+// different one per screen.
 //
 //   SE_RENDER_ZBUFFER  walks triangles, and for each one walks the pixels
 //                      it covers, depth-testing per pixel. Cost scales
@@ -59,23 +58,24 @@
 //                      x overdraw. The depth plane (and the framebuffer)
 //                      are in PSRAM at full resolution.
 //
-//   SE_RENDER_BANDED   the same, one vertical band of SE_SCENE_BAND_W
-//                      columns at a time (se_config.h), each drawn into
-//                      colour and depth buffers in internal SRAM and
-//                      copied back: the per-pixel work never touches
-//                      PSRAM. A triangle spanning several bands is set up
-//                      once per band. Needs ~60 KB of internal SRAM,
-//                      allocated on first use; without it, it renders as
-//                      SE_RENDER_ZBUFFER. Being measured against the
-//                      z-buffer: one of the two will go.
+// It is the only built-in. Two others were tried and removed, both under
+// 2.2: a tiled primary-ray raycaster, which no game ever rendered with,
+// and SE_RENDER_BANDED, which drew the z-buffer's passes one band of
+// columns at a time in internal SRAM. Banding was 1.6x faster at full
+// resolution but 8% SLOWER at quarter resolution, where a game that
+// wants the frame rate actually runs and where the depth plane is
+// already in SRAM; its band buffers could not be widened past 32 columns
+// on a P4 (internal SRAM is too fragmented for two 60 KB blocks), so the
+// gap could not be closed, and it cost 60 KB that scarcer things want.
+// See the CHANGELOG, and CraftMiner's claudeplans/craftminer.md G6 for
+// the measurements.
 //
 // Values from SE_RENDER_BUILTIN_COUNT up are handles returned by
 // se_renderer_register() (see below).
 typedef enum {
     SE_RENDER_ZBUFFER = 0,           // per-pixel reciprocal-z depth test
-    SE_RENDER_BANDED  = 1,           // the same, band by band in internal SRAM
     SE_RENDER_DEFAULT = SE_RENDER_ZBUFFER,
-    SE_RENDER_BUILTIN_COUNT = 2,     // first handle se_renderer_register() hands out
+    SE_RENDER_BUILTIN_COUNT = 1,     // first handle se_renderer_register() hands out
     SE_RENDER_MAX = 8,               // renderer table size (built-ins + custom)
 } se_render_mode_t;
 

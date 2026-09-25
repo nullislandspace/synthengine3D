@@ -13,43 +13,59 @@ Up to 1.1.0 there was also a PATCH number; 2.0 dropped it (see below).
 `src/` (including `src/internal/`) stays internal and may change in any
 release.
 
-## [2.2] — 2026-09-23
+## [2.2] — 2026-09-25
 
 A 2.1 game builds unchanged unless it selects `SE_RENDER_RAYCAST` (see
 below). Still unreleased and still being worked on, so it collects
-everything of this round rather than taking a number per change.
+everything of this round rather than taking a number per change --
+including a renderer that was added, measured and removed again within
+it, which is why no version was spent on it.
 
-### Added — `SE_RENDER_BANDED`, the z-buffer drawn band by band in internal SRAM
+### Removed — `SE_RENDER_BANDED`, added and measured away in the same version
 
-```c
-scene_prepare(SE_RENDER_BANDED);
-scene_rasterize(SE_RENDER_BANDED);
-```
+A second built-in renderer that ran the z-buffer's own passes one vertical
+band of columns at a time, each band copied into internal SRAM, drawn
+against a 16-bit depth buffer there, and copied back, so the per-pixel work
+never touched PSRAM. It drew the z-buffer's image pixel for pixel, proved
+by a host check over 1000 random scenes (full and quarter resolution,
+viewports, cull and order, lighting, tint, cut-out textures) that also
+caught a deliberately broken copy.
 
-A second built-in renderer, to be measured against the z-buffer; one of
-the two will go. It runs the z-buffer renderer's passes one vertical band
-of `SE_SCENE_BAND_W` logical columns (default 32) at a time. A logical
-column is one raw row of the rotated framebuffer, so a band is one
-contiguous block: it is copied into a colour buffer in internal SRAM,
-drawn against a plain 16-bit depth buffer there, and copied back. The
-per-pixel depth test and pixel writes never touch PSRAM, and bands no
-primitive touches are skipped. `scene_prepare()` records which bands each
-primitive spans; a triangle spanning N bands is set up N times.
+It was removed because it lost where it mattered. Measured in CraftMiner
+over a fixed 40-second flight across five biomes (`claudeplans/craftminer.md`,
+G6):
 
-The image is the z-buffer's, pixel for pixel: a host check drawing random
-scenes both ways (full and quarter resolution, viewports, cull and order,
-lighting, tint, cut-out textures) found no difference.
+| | fps | rasterize |
+|---|---|---|
+| Quarter resolution, z-buffer | **20.16** | **27.59 ms** |
+| Quarter resolution, banded | 18.13 | 29.72 ms |
+| Full resolution, z-buffer | 5.70 | 148.18 ms |
+| Full resolution, banded | **8.08** | **92.06 ms** |
 
-It needs 2 × `SE_SCENE_BAND_W` × 480 × 2 bytes of internal SRAM (60 KB at
-the default), allocated on first use; without it, it logs once and renders
-as `SE_RENDER_ZBUFFER`. `SE_RENDER_BUILTIN_COUNT` goes back to 2, so
-registered renderers get handles from 2 again.
+1.61x faster at full resolution, 8% slower at quarter. Full resolution is
+unplayable either way, so the only number that decides anything is the
+quarter-resolution one. The split is explained: at quarter resolution
+`SE_SCENE_DEPTH16_INTERNAL` already puts the depth test in SRAM, which is
+the larger half of what banding buys, leaving only the colour writes
+against the cost of setting a triangle up once per band it spans.
 
-Inside, the raster passes now draw through one raster target (colour,
-depth, index offset, clip rectangle, fill counters) instead of the
-frame-level buffers, which is what lets a band be a target. It is also
-the step towards drawing bands on the second core: each core then needs
-its own target and band buffers, and nothing else.
+Wider bands would cut that cost, but 64 columns needs two 60 KB contiguous
+blocks of internal SRAM and the largest free block on a P4 is 37-38 KB,
+with or without the depth plane freed — so 32 was the widest the hardware
+allows and the gap could not be closed. For reference, that same depth
+plane is worth 27.59 ms against 40.11 ms to the z-buffer, which is a far
+better use of the same SRAM than band buffers.
+
+`SE_RENDER_BANDED` and `SE_SCENE_BAND_W` are gone and
+`SE_RENDER_BUILTIN_COUNT` is back to 1, so `se_renderer_register()` hands
+out handles from 1. Removing a public symbol is MAJOR by the rules above;
+like the raycaster below it is recorded here as a deliberate exception,
+because 2.2 has never been released and the symbol never shipped in one.
+
+**What stays** is the raster target: the raster passes draw through one
+struct (colour, depth, index offset, clip rectangle, fill counters)
+instead of the frame-level buffers. It was introduced to make a band a
+target and is kept because it is what a second core would need.
 
 ### Changed — the flip drops the frame from the cache
 

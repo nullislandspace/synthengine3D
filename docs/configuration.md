@@ -72,11 +72,6 @@ leaves hardcode rotation + stride into their inner loops off these.
   entries.
 - `SE_SCENE_POINT_CAP` — points per frame (default 1024, ~16 bytes each),
   allocated in PSRAM on the first `scene_point()`.
-- `SE_SCENE_BAND_W` — band width of `SE_RENDER_BANDED`, in logical columns
-  (default 32, at least 4). Its two band buffers take `2 × SE_SCENE_BAND_W ×
-  480 × 2` bytes of internal SRAM (60 KB at the default), allocated the first
-  time the renderer is used. Wider bands set up fewer triangles twice and cost
-  more SRAM ([renderer.md](renderer.md#banded-rendering-se_render_banded)).
 
 The flat-triangle and edge lists (4096 each) are fixed inside the engine and
 not overridable. Every list drops its overflow silently.

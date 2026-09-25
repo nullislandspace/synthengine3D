@@ -146,9 +146,7 @@ Simpler than it looks, because of *who writes what*:
   an explicit invalidate for two reasons: (1) the CPU *overwrites* PPA output,
   it never reads it back and uses it, and (2) on a write the CPU read-allocates
   the cache line, and it always gets the fresh PPA pixels because the flip
-  dropped this buffer's lines from the cache. `SE_RENDER_BANDED` does read
-  the backdrop back (it copies each band into SRAM first); it writes back and
-  drops the band's lines itself before it does. An app that reads PPA output
+  dropped this buffer's lines from the cache. An app that reads PPA output
   back to *use* it needs the explicit calls above.
 
 ## Threading

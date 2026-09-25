@@ -200,7 +200,7 @@ static void se_present(void) {
     // cached from this frame would then hold old pixels, and a partial
     // CPU write into it (a HUD glyph) would write them back over the new
     // backdrop. This used to be left to the frame's working set evicting
-    // everything; with depth in internal SRAM (SE_RENDER_BANDED) it may
+    // everything; with depth in internal SRAM it may
     // not. draw_bitmap's own write-back then finds nothing to do.
     void* const px = pax_buf_get_pixels_rw(s_fb);
     esp_cache_msync(px, pax_buf_get_size(s_fb), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);

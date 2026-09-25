@@ -81,8 +81,7 @@ submit ─▶ [tri list] [edge list] ─▶ scene_render: cull ─▶ order ─�
 ```
 
 `se_render_mode_t` selects the algorithm: `SE_RENDER_ZBUFFER`
-(= `SE_RENDER_DEFAULT`), `SE_RENDER_BANDED` (the same, band by band in
-internal SRAM; see below), or one a game registers.
+(= `SE_RENDER_DEFAULT`), or one a game registers.
 
 **Near-plane clipping** happens at submit time, in camera space, against
 `RENDER_NEAR_CLIP_Z` (it is not the central cull):
@@ -306,41 +305,46 @@ frames (the one-frame, one-pixel mis-resolve that could in principle cause is
 invisible in practice); frame 0 is skipped on wrap so a zero-initialised cell
 never matches a live frame.
 
-## Banded rendering (`SE_RENDER_BANDED`)
+## Renderers that were tried and removed
 
-The z-buffer renderer's per-pixel work goes to PSRAM: at full resolution the
-depth test reads and writes the stamped depth plane, and every pixel lands in
-the framebuffer, both through a 128 KB cache far smaller than either. The
-banded renderer runs the same passes one vertical band of `SE_SCENE_BAND_W`
-logical columns at a time (32 by default, [configuration.md](configuration.md)):
+Two built-ins besides the z-buffer have existed and been measured away. Both
+went under 2.2, before it was released.
 
-- A logical column is one raw row of the rotated framebuffer, so a band is one
-  **contiguous** block of it. The band is copied into a colour buffer in
-  internal SRAM (with whatever the frame already holds there — the backdrop),
-  drawn against a plain 16-bit depth buffer in internal SRAM, and copied back.
-  PSRAM sees one sequential read and one sequential write per band.
-- Bands no primitive touches are **skipped**, copy and all.
-- `scene_prepare()` records which bands each primitive spans, so a band only
-  sets up the primitives it contains. A triangle spanning N bands is set up N
-  times: that is what it costs.
-- The image is **pixel for pixel** the z-buffer renderer's (same passes, same
-  order, same depth encoding). A host check drawing random scenes both ways
-  found no difference across full and quarter resolution, viewports, cull and
-  order, lighting, tint and cut-out textures.
-- It needs two band buffers in internal SRAM, `2 × SE_SCENE_BAND_W × 480 × 2`
-  bytes (60 KB at the default), allocated on first use; the span tables go in
-  PSRAM. Without the SRAM it logs once and renders as `SE_RENDER_ZBUFFER`.
-- Prepare and rasterize must use the same mode in a frame; a banded rasterize
-  whose spans were not prepared this frame renders as the z-buffer.
+**A tiled primary-ray raycaster** (`SE_RENDER_RAYCAST`). No game ever rendered
+with it: Race the Synth measured 60.9 ms against the z-buffer's 12.6–22.4 ms.
+It still had to follow every renderer change, so it cost more to keep than it
+could ever return.
 
-It is **being measured** against the z-buffer renderer, and one of the two
-will go. At quarter resolution with `SE_SCENE_DEPTH16_INTERNAL` the depth
-test is already in SRAM, so the difference there is the colour writes; at full
-resolution it is both.
+**Banded rendering** (`SE_RENDER_BANDED`) ran the z-buffer's own passes one
+vertical band of columns at a time, each band copied into internal SRAM, drawn
+against a 16-bit depth buffer there, and copied back — so the per-pixel work
+never touched PSRAM. It drew the same image, proved over 1000 random scenes on
+the host. Measured in CraftMiner over a fixed 40-second flight
+(`claudeplans/craftminer.md`, G6):
 
-The per-band state lives in one raster target, so a later version can hand
-bands to the second core: it needs its own band buffers and target, and reads
-the same lists and spans.
+| | fps | rasterize |
+|---|---|---|
+| Quarter resolution, z-buffer | **20.16** | **27.59 ms** |
+| Quarter resolution, banded | 18.13 | 29.72 ms |
+| Full resolution, z-buffer | 5.70 | 148.18 ms |
+| Full resolution, banded | **8.08** | **92.06 ms** |
+
+1.61x faster at full resolution, 8% slower at quarter — and quarter is where a
+game that cares about frame rate runs, because full resolution is unplayable
+either way. The reason for the split is that at quarter resolution
+`SE_SCENE_DEPTH16_INTERNAL` already puts the depth test in SRAM, which is the
+larger half of what banding buys; what is left is the colour writes, against
+the cost of setting a triangle up once per band it spans.
+
+Wider bands would have cut that cost, but 64 columns needs two 60 KB
+contiguous blocks of internal SRAM and the largest free block on a P4 is
+37–38 KB — with or without the depth plane freed. So 32 was the widest this
+hardware allows and the gap could not be closed. It was removed, and its
+60 KB with it.
+
+What survives is the **raster target**: the passes draw through one struct
+describing where they write, rather than the frame-level buffers. That is
+what a second core would need.
 
 ## What the engine does and doesn't do
 

@@ -323,15 +323,3 @@
 #ifndef SE_SCENE_DEPTH16_INTERNAL
 #define SE_SCENE_DEPTH16_INTERNAL  0
 #endif
-
-// ---- Banded rendering (SE_RENDER_BANDED) -------------------------------
-//
-// Width, in logical columns, of the bands SE_RENDER_BANDED draws the frame
-// in. Each band is drawn into a colour and a 16-bit depth buffer in
-// internal SRAM, allocated the first time the renderer is used: 2 x
-// SE_SCENE_BAND_W x 480 x 2 bytes, 60 KB at the default. Wider bands mean
-// fewer triangles set up more than once (one that spans N bands is set up
-// N times) but more SRAM. At least 4 (band numbers are 8-bit).
-#ifndef SE_SCENE_BAND_W
-#define SE_SCENE_BAND_W  32
-#endif
