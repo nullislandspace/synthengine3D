@@ -32,6 +32,24 @@ set(SE_SRCS
     src/se_ui.c            # EF: UI / list-menu system
     src/se_bindings.c      # EF: input bindings (remap + persistence)
     src/se_ppa.c           # E7: ESP32-P4 PPA blit helper (backdrop/sprite offload)
+    src/se_stream.c        # E8: live A/V streaming, MPEG-TS over UDP
+    src/internal/tsmux.c   # E8: MPEG-TS muxer (plain C, host-testable)
+    src/internal/netraw.c  # E8: ARP/ICMP/DHCP/UDP for the link
+    src/internal/usbnet.c  # E8: the USB-C port as a CDC-NCM adapter
+    src/internal/se_stream_audio.c  # E8: the mixer's output into the stream
+)
+
+# TinyUSB, vendored (src/internal/tinyusb/PROVENANCE.md). ONLY IN APP
+# MODE: under the IDF the host (graceloader, the launcher) already has a
+# USB stack and two of them in one binary is one too many. An app built
+# by the plain-CMake path has none, so it brings this one.
+set(SE_TINYUSB_SRCS
+    src/internal/tinyusb/src/tusb.c
+    src/internal/tinyusb/src/common/tusb_fifo.c
+    src/internal/tinyusb/src/device/usbd.c
+    src/internal/tinyusb/src/class/net/ncm_device.c
+    src/internal/tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c
+    src/internal/tinyusb/src/portable/synopsys/dwc2/dwc2_common.c
 )
 
 if(COMMAND idf_component_register)
@@ -39,7 +57,7 @@ if(COMMAND idf_component_register)
     idf_component_register(
         SRCS ${SE_SRCS}
         INCLUDE_DIRS "include"
-        PRIV_INCLUDE_DIRS "src" "src/internal"
+        PRIV_INCLUDE_DIRS "src" "src/internal" "src/internal/tinyusb/src"
         # esp_driver_ppa: the PPA peripheral driver (se_ppa.c);
         # esp_mm: esp_cache_msync for the PPA layer-cache flush.
         REQUIRES freertos esp_driver_ppa esp_mm
@@ -51,12 +69,16 @@ else()
     # CMAKE_C_FLAGS_INIT and apply to every target in the project, so they
     # are inherited here automatically; the per-target options below match
     # the top-level CMakeLists.txt verbatim.
-    add_library(synthengine3d OBJECT ${SE_SRCS})
+    # TinyUSB only here: see where SE_TINYUSB_SRCS is defined.
+    add_library(synthengine3d OBJECT ${SE_SRCS} ${SE_TINYUSB_SRCS})
+    # Upstream code, kept byte-identical: its warnings are not ours.
+    set_source_files_properties(${SE_TINYUSB_SRCS} PROPERTIES COMPILE_OPTIONS "-w")
 
     target_include_directories(synthengine3d
         PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/tinyusb/src
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/esp_additions/include
     )

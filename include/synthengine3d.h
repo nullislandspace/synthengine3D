@@ -30,6 +30,7 @@
 #include "se_ppa.h"             // E7  -- ESP32-P4 PPA blit helper (backdrop offload)
 #include "se_run.h"             // EF  -- application framework / run loop (API; impl staged in)
 #include "se_splash.h"          // EF  -- 3D engine splash screen
+#include "se_stream.h"          // E8  -- live A/V streaming to a PC (MPEG-TS/UDP)
 #include "se_hw.h"              // EF  -- device-global hardware settings (volume/brightness)
 #include "se_ui.h"              // EF  -- UI / list-menu system
 #include "se_bindings.h"        // EF  -- input bindings (remap + persistence)

@@ -21,6 +21,49 @@ helps no one. Nothing in the engine changed for it.
 
 ## [2.2] — 2026-09-25
 
+### Added — `se_stream.h`, live A/V streaming to a PC
+
+The game's screen out of the USB-C port as H.264 in MPEG-TS over UDP, which
+OBS plays directly with no server in between. Four calls: start, offer a
+frame, stop, read the statistics.
+
+Ported from `tanmatsu-nfmtest-grace`, which was written to find out whether
+this was possible at all and what it cost. What that project proved, this
+packages: the CDC-NCM link, the muxer and the hardware encoder come across
+as they were, and the frame source does not. There the frames came from a
+test pattern drawn in its own task and taken at a fixed rate; here they come
+from the game, at whatever rate the game runs.
+
+**The colour conversion is in the caller, on purpose.** `se_stream_frame()`
+runs the PPA and returns; encoder, muxer and USB belong to another task.
+That split is not about balance, it is about ownership: the moment the
+render callback returns, the engine flips pages and the frame is being drawn
+into again, so the only safe place to read it is before that. A frame
+offered while the encoder is still busy is dropped and counted, never waited
+for — a stream that stutters beats a game that does.
+
+**It takes the console with it.** The USB-C port has one PHY, so starting a
+stream hands it from the USB-Serial-JTAG console to the OTG controller:
+while it runs there is no console, no debug link and no log output. A game
+must therefore be able to switch it off without one, and should not persist
+the setting. Everything that can fail and be reported happens before the
+link comes up, while there is still somewhere to report it.
+
+**Audio is the engine's to give.** Because the mixer is already here
+(`se_audio.h`), `cfg.audio` needs nothing from the game: no tap to hold, no
+callback to register. The plumbing is in — the mixer offers every chunk it
+writes, silence included, and the PTS counts samples rather than reading a
+clock, so it cannot drift against itself — but the codec is not, and
+`cfg.audio` reports honestly until it is. Every MPEG audio encoder worth
+vendoring is LGPL, and everything vendored here so far is permissive
+(minimp3 is public domain, TinyUSB MIT), so that is a licensing decision
+rather than a technical one.
+
+TinyUSB is vendored under `src/internal/tinyusb` and built **only in
+plain-CMake mode**: under the IDF the host already has a USB stack, and two
+in one binary is one too many.
+
+
 A 2.1 game builds unchanged unless it selects `SE_RENDER_RAYCAST` (see
 below). Still unreleased and still being worked on, so it collects
 everything of this round rather than taking a number per change --

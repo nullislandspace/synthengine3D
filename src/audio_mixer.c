@@ -1,4 +1,5 @@
 #include "se_audio.h"
+#include "se_stream_tap.h"
 
 #include "se_audio_dsp.h"
 #include "se_config.h"
@@ -234,6 +235,7 @@ static void mixer_task_fn(void* arg) {
                 if (!g_powered_on) power_up();
                 memset(g_out, 0, sizeof(g_out));
                 size_t written = 0;
+                se_stream_tap(g_out, MIXER_CHUNK_FRAMES);
                 i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
                 silence_chunks = 0;
                 continue;
@@ -245,6 +247,7 @@ static void mixer_task_fn(void* arg) {
             if (silence_chunks < MIXER_DRAIN_CHUNKS) {
                 memset(g_out, 0, sizeof(g_out));
                 size_t written = 0;
+                se_stream_tap(g_out, MIXER_CHUNK_FRAMES);
                 i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
                 silence_chunks++;
                 continue;
@@ -269,6 +272,10 @@ static void mixer_task_fn(void* arg) {
             int32_t a = s < 0 ? -s : s;
             if (a > peak) peak = a;
         }
+
+        // The stream hears exactly what the speaker does, and hears it
+        // before the DMA does: this copies and returns (se_stream.h).
+        se_stream_tap(g_out, MIXER_CHUNK_FRAMES);
 
         size_t    written = 0;
         esp_err_t werr    = i2s_channel_write(g_i2s, g_out, sizeof(g_out), &written, portMAX_DELAY);
