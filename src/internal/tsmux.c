@@ -18,6 +18,66 @@
 // then the rbsp stop bit.
 static uint8_t const AUD[] = {0x00, 0x00, 0x00, 0x01, 0x09, 0xF0};
 
+// Is there a start code at `i`? Annex-B allows three bytes or four.
+static size_t start_code_at(uint8_t const* d, size_t len, size_t i) {
+    if (i + 3 > len) return 0;
+    if (d[i] != 0 || d[i + 1] != 0) return 0;
+    if (d[i + 2] == 1) return 3;
+    if (d[i + 2] == 0 && i + 4 <= len && d[i + 3] == 1) return 4;
+    return 0;
+}
+
+// WHY THE PARAMETER SETS ARE RESENT WITH EVERY ACCESS UNIT.
+//
+// The encoder emits SPS and PPS once, in its first access unit. Over UDP
+// that is the same as not emitting them at all for anyone who was not
+// already listening: there is no connection, no handshake and no way to
+// ask for a replay, so a receiver that opens its socket a second late has
+// missed them for good and every slice after that references a PPS it has
+// never seen. The symptom is not silence -- the transport stream parses,
+// the program is found, the stream is correctly identified as H.264 -- it
+// is "unspecified size" and "non-existing PPS 0 referenced" for ever.
+//
+// Resending before each KEYFRAME is the usual answer and is not enough
+// here. OBS opens its media source with analyzeduration 0, so it decides
+// what the stream contains from the first few packets it happens to see
+// and does not wait a GOP to find out. ffplay, which waits, plays the
+// same stream perfectly -- which is exactly how this was mistaken for a
+// working stream.
+//
+// So they go in front of every access unit. SPS and PPS together are
+// about forty bytes; at twenty frames a second that is under a kilobyte a
+// second against a three megabit stream, and it buys a stream any
+// receiver can join at any instant.
+static void cache_params(tsmux_t* m, uint8_t const* au, size_t len, bool* has_sps) {
+    size_t sps_at = 0, sps_end = 0, pps_at = 0, pps_end = 0;
+    bool   sps = false, pps = false;
+    size_t i = 0;
+
+    while (i < len) {
+        size_t const sc = start_code_at(au, len, i);
+        if (sc == 0) { i++; continue; }
+        size_t const nal = i + sc;
+        if (nal >= len) break;
+        int const type = au[nal] & 0x1F;
+        size_t    j    = nal + 1;
+        while (j < len && start_code_at(au, len, j) == 0) j++;
+        if (type == 7) { sps_at = i; sps_end = j; sps = true; }
+        else if (type == 8) { pps_at = i; pps_end = j; pps = true; }
+        i = j;
+    }
+
+    *has_sps = sps;
+    if (sps && pps) {
+        size_t const n = (sps_end - sps_at) + (pps_end - pps_at);
+        if (n <= TSMUX_PARAMS_MAX) {
+            memcpy(m->params, au + sps_at, sps_end - sps_at);
+            memcpy(m->params + (sps_end - sps_at), au + pps_at, pps_end - pps_at);
+            m->params_len = n;
+        }
+    }
+}
+
 uint32_t tsmux_crc32(uint8_t const* data, size_t len) {
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < len; i++) {
@@ -143,15 +203,15 @@ static void put_pts(uint8_t* p, uint64_t pts) {
 // Copies payload from the PES header, then the AUD, then the access unit,
 // as if they were one buffer.
 typedef struct {
-    uint8_t const* part[3];
-    size_t         len[3];
+    uint8_t const* part[4];
+    size_t         len[4];
     int            idx;
     size_t         off;
 } src_t;
 
 static size_t src_left(src_t const* s) {
     size_t n = 0;
-    for (int i = s->idx; i < 3; i++) n += s->len[i] - (i == s->idx ? s->off : 0);
+    for (int i = s->idx; i < 4; i++) n += s->len[i] - (i == s->idx ? s->off : 0);
     return n;
 }
 
@@ -192,7 +252,16 @@ void tsmux_write(tsmux_t* m, uint8_t const* au, size_t len, uint64_t pts, bool k
     pes[8] = 5;     // PES_header_data_length
     put_pts(pes + 9, pts);
 
-    src_t src = {.part = {pes, AUD, au}, .len = {sizeof(pes), sizeof(AUD), len}};
+    // Cache this access unit's parameter sets if it carries them, and put
+    // the cached ones in front of it if it does not. See cache_params().
+    bool has_sps = false;
+    cache_params(m, au, len, &has_sps);
+    uint8_t const* inject     = m->params;
+    size_t         inject_len = (!has_sps && m->params_len > 0) ? m->params_len : 0;
+    if (inject_len) m->params_sent++;
+
+    src_t src = {.part = {pes, AUD, inject, au},
+                 .len  = {sizeof(pes), sizeof(AUD), inject_len, len}};
 
     bool first = true;
     while (src_left(&src) > 0) {

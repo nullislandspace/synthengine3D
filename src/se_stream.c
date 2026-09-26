@@ -57,6 +57,11 @@ static volatile bool         s_done;
 static volatile int          s_ready;  // filled and waiting for the encoder, -1 none
 static int                   s_fill;
 static uint32_t              s_seq;
+// WHEN each buffer was captured, and when the stream began. Both in
+// esp_timer microseconds, because a PTS has to be REAL TIME -- see the
+// note where the video PTS is computed.
+static int64_t               s_cap_us[NYUV];
+static int64_t               s_t0_us;
 
 static bool emit(void* ctx, uint8_t const* d, size_t len) {
     (void)ctx;
@@ -124,6 +129,10 @@ void se_stream_frame(pax_buf_t* fb) {
 
     // Published last, and only now: until this line the stream task has
     // no claim on the buffer.
+    // Stamped HERE, not in the stream task: this is when the picture
+    // existed. The encoder may not get to it for tens of milliseconds.
+    s_cap_us[s_fill] = esp_timer_get_time();
+
     int const filled = s_fill;
     s_fill           = (s_fill + 1) % NYUV;
     __sync_synchronize();
@@ -167,10 +176,27 @@ static void stream_task(void* arg) {
             continue;
         }
 
-        // The PTS is derived from the frames actually sent and the rate
-        // the encoder was configured for. The game's rate varies; the
-        // player only needs a clock that advances evenly.
-        uint64_t const pts = 90000 + (uint64_t)s_seq * 90000 / (uint64_t)s_cfg.fps_hint;
+        // THE PTS IS REAL TIME, AND IT HAS TO BE.
+        //
+        // This used to be `s_seq * 90000 / fps_hint` -- a frame counter
+        // scaled by the rate the encoder was configured for -- on the
+        // reasoning that a player only needs a clock that advances evenly.
+        // That is true of a stream carrying video alone, and wrong as soon
+        // as there is a second stream to agree with.
+        //
+        // fps_hint is a HINT: the game renders at whatever rate it manages
+        // and frames offered while the encoder is busy are dropped without
+        // advancing s_seq at all. So that clock ran at (actual rate /
+        // fps_hint) times real time -- typically well under half. The
+        // audio clock, meanwhile, counts SAMPLES, which is real time by
+        // construction. Two clocks running at different rates, with the
+        // PCR riding this one: the audio's timestamps pull steadily ahead
+        // of the stream clock and a player holds them back to match, so
+        // the sound arrives late by an amount that GROWS the longer the
+        // stream runs. Seconds, within a minute.
+        //
+        // Real elapsed microseconds, scaled to 90 kHz (90000/1e6 = 9/100).
+        uint64_t const pts = 90000 + (uint64_t)((s_cap_us[b] - s_t0_us) * 9 / 100);
 
         esp_h264_enc_in_frame_t  in   = {.raw_data = {.buffer = s_yuv[b], .len = YUV_BYTES}, .pts = (uint32_t)pts};
         esp_h264_enc_out_frame_t out  = {.raw_data = {.buffer = s_bs, .len = YUV_BYTES}};
@@ -298,6 +324,9 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
     s_ready = -1;
     s_fill  = 0;
     s_seq   = 0;
+    // The stream's time origin. Every video PTS is measured from here, so
+    // it must be set once, when the stream starts -- not per frame.
+    s_t0_us = esp_timer_get_time();
     s_done  = false;
     s_run   = true;
     xTaskCreatePinnedToCore(stream_task, "se_stream", TASK_STACK, NULL, STREAM_PRIO, NULL, STREAM_CORE);
@@ -314,6 +343,20 @@ void se_stream_stop(void) {
     for (int i = 0; !s_done && i < 200; i++) vTaskDelay(pdMS_TO_TICKS(10));
     if (s_cfg.audio) audio_mixer_keep_awake(false);
     usbnet_stop();
+    // THE FIRST MOMENT THERE IS ANYWHERE TO PRINT since the stream began,
+    // so print what happened. Nothing between start and stop can be
+    // logged, which makes "the player saw nothing" a question these
+    // counters answer and nothing else does: no `published` means the
+    // game never offered a frame, no `frames` means the encoder refused
+    // them, no `dgrams` means the muxer emitted nothing, and
+    // `dgrams_failed` near `dgrams` means the link took nothing.
+    ESP_LOGI(TAG, "stream off: published %lu dropped %lu | frames %lu key %lu enc_err %lu ppa_err %lu",
+             (unsigned long)s_st.published, (unsigned long)s_st.dropped, (unsigned long)s_st.frames,
+             (unsigned long)s_st.keyframes, (unsigned long)s_st.enc_errors, (unsigned long)s_st.ppa_errors);
+    ESP_LOGI(TAG, "stream off: dgrams %lu failed %lu | ts %llu B | audio %lu dropped %lu",
+             (unsigned long)s_st.dgrams, (unsigned long)s_st.dgrams_failed,
+             (unsigned long long)s_st.ts_bytes, (unsigned long)s_st.audio_frames,
+             (unsigned long)s_st.audio_dropped);
     free_all();
     ESP_LOGI(TAG, "stream off: the console is back");
 }

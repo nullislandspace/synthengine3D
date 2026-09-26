@@ -19,6 +19,55 @@ new way throughout, including entries written before the rename: the
 measurements are the same measurements, and a name nobody can look up
 helps no one. Nothing in the engine changed for it.
 
+## [2.4] — 2026-09-26
+
+### Fixed — `se_stream.h`, the stream now actually plays on a PC
+
+2.2 built the streaming and 2.3 gave it audio; neither had been run against
+a real receiver. Doing that turned up three bugs, none of them in a codec
+and all of them in the transport.
+
+**The video and audio clocks ran at different rates.** The audio PTS
+counted samples, which is real time by construction. The video PTS was
+`frames_encoded * 90000 / fps_hint` — but `fps_hint` is a hint, a game
+renders at whatever it manages, and a frame offered while the encoder is
+busy is dropped without advancing the counter at all. So the video clock
+ran at well under half real time, and with the PCR riding the video PID the
+audio's timestamps pulled steadily ahead of the stream clock: the sound
+arrived late by an amount that GREW, reaching seconds within a minute. The
+video PTS is now real elapsed time, stamped when the frame is CAPTURED
+rather than when the encoder reaches it.
+
+**The H.264 parameter sets were sent too rarely to join.** The encoder puts
+SPS and PPS in front of each keyframe, about once a second. Over UDP there
+is no handshake and no replay, so whether a receiver ever decoded depended
+on where in the GOP it opened its socket — and it fails silently, as
+`unspecified size` and `non-existing PPS 0 referenced` rather than as an
+error. `tsmux` now caches them and puts them in front of EVERY access unit:
+forty bytes a frame, 8 kbit/s against a 3 Mbit/s stream. Measured on the
+host by truncating a muxed stream at every packet boundary and probing each
+with OBS's settings: **50.2% of join points before, 94.9% after.**
+
+Worth knowing: `ffplay` waits for a keyframe and played the broken stream
+perfectly, while OBS probes with `analyzeduration 0` and did not. One
+player's verdict is not evidence that a stream is correct.
+
+**Quitting an app mid-stream wedged the badge.** `se_stream_stop()` was only
+reachable from whatever menu row turned the stream on, so returning from
+the run loop left `usbnet` holding the USB-C PHY — and a badge back in its
+launcher with neither console nor BadgeLink, needing a power cycle, with
+nothing on screen to say why. `se_run()` now stops the stream itself. The
+stream is the engine's resource; a game should not have to remember.
+
+### Added — instrumentation, because the console is what the stream takes
+
+`se_stream_stop()` logs the full statistics at the first moment there is
+anywhere to print them. `published`/`frames`/`dgrams`/`dgrams_failed`
+separate "the game never offered a frame" from "the encoder refused it"
+from "the muxer emitted nothing" from "the link took nothing" — which is
+otherwise unknowable, since starting the stream removes every channel you
+would diagnose it through.
+
 ## [2.3] — 2026-09-26
 
 ### Changed — `se_stream.h`, `cfg.audio` now actually carries audio

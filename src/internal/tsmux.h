@@ -14,6 +14,9 @@
 //      unit, TSMUX_PCR_LEAD before its PTS;
 //    - an access unit delimiter in front of every access unit (the
 //      encoder does not write one; ffmpeg's parser likes to have it);
+//    - the SPS and PPS in front of every access unit that does not carry
+//      its own, cached from the one that did. Without this a receiver can
+//      only ever join in the first few milliseconds of a stream;
 //    - random_access_indicator on keyframes;
 //    - MPEG-2 Layer II audio on PID 0x101 (stream_type 0x04) when it is
 //      switched on, one PES per audio frame, PTS only. The PCR stays on
@@ -40,6 +43,7 @@
 #define TSMUX_PID_VIDEO       0x0100
 #define TSMUX_PID_AUDIO       0x0101
 #define TSMUX_TABLE_INTERVAL  15      // access units between PAT/PMT at most
+#define TSMUX_PARAMS_MAX      256     // room for one SPS + one PPS, with start codes
 #define TSMUX_PCR_LEAD        9000    // 100 ms, in 90 kHz ticks
 
 // Called for every finished datagram (1..7 packets); returns false if it
@@ -50,6 +54,11 @@ typedef struct {
     uint8_t      dgram[TSMUX_DGRAM_MAX];
     size_t       fill;
     uint8_t      cc_pat, cc_pmt, cc_video, cc_audio;  // continuity counters
+    // The encoder sends SPS and PPS once, in its first access unit. Over
+    // UDP anyone who joined later never sees them, so they are cached here
+    // and put in front of every access unit that does not carry its own.
+    uint8_t      params[TSMUX_PARAMS_MAX];
+    size_t       params_len;
     bool         audio;                               // announce an audio stream in the PMT
     uint32_t     since_tables;
     tsmux_emit_t emit;
@@ -59,7 +68,8 @@ typedef struct {
     uint32_t     packets;
     uint32_t     dgrams;
     uint32_t     dgrams_failed;
-    uint64_t     bytes;  // datagram bytes handed to emit
+    uint32_t     params_sent;  // access units given the cached SPS/PPS
+    uint64_t     bytes;        // datagram bytes handed to emit
 } tsmux_t;
 
 void tsmux_init(tsmux_t* m, tsmux_emit_t emit, void* ctx);

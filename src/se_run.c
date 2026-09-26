@@ -16,6 +16,7 @@
 // =====================================================================
 
 #include "se_run.h"
+#include "se_stream.h"
 
 #include "se_config.h"      // SE_FRAME_DT_MAX, SE_HW_VOLUME_STEP_PCT, SE_UI_*
 #include "se_audio.h"       // audio_mixer_init, audio_mixer_shutdown
@@ -508,6 +509,16 @@ void se_run(se_app_config_t const* cfg, se_app_callbacks_t const* cb, void* user
         // Flip to the finished frame at the next refresh.
         se_present();
     }
+
+    // THE STREAM IS THE ENGINE'S, SO THE ENGINE PUTS IT BACK. Leaving it
+    // running past the run loop does not merely leak: se_stream_start()
+    // handed the USB-C PHY to the OTG controller, and until
+    // se_stream_stop() gives it back there is no console AND no BadgeLink
+    // -- so a badge that exits an app mid-stream comes back to a launcher
+    // that cannot be reached by either, with nothing on screen to say why.
+    // A game should not have to remember this, and the one that forgot is
+    // how it was found. Idempotent when nothing is streaming.
+    se_stream_stop();
 
     if (cb->on_shutdown) {
         cb->on_shutdown(user);
