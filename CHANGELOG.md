@@ -29,9 +29,15 @@ this stream; video only" and degrade, because the plumbing was finished
 and there was no encoder behind it.
 
 There is now: **pdmp2**, an MPEG-1/2 Layer II encoder written for this,
-in the public domain. `src/internal/pdmp2/PROVENANCE.md` records where
-every number in it came from, and upstream is
-`github.com/nullislandspace/public-domain-mp2-encoder`.
+in the public domain. It is a **submodule** at `src/internal/pdmp2`
+(`github.com/nullislandspace/public-domain-mp2-encoder`), not a vendored
+copy, so its host test suite and the tool that measures its filterbank
+window travel with it and a fix goes upstream rather than into a copy.
+Its `PROVENANCE.md` records where every number in it came from.
+
+Clone with `--recursive`, or run `git submodule update --init
+--recursive`; CMake stops with that instruction rather than a hundred
+missing-header errors if the directory is empty.
 
 **Why write one.** Every MPEG audio encoder worth vendoring — shine,
 twolame, LAME — is LGPL. That is workable for an application and awkward

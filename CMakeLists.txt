@@ -37,15 +37,27 @@ set(SE_SRCS
     src/internal/netraw.c  # E8: ARP/ICMP/DHCP/UDP for the link
     src/internal/usbnet.c  # E8: the USB-C port as a CDC-NCM adapter
     src/internal/se_stream_audio.c  # E8: the mixer's output into the stream
-    # pdmp2, vendored (src/internal/pdmp2/PROVENANCE.md): the MPEG Layer
-    # II encoder behind se_stream's cfg.audio. PUBLIC DOMAIN, which is the
-    # whole reason it was written -- shine, twolame and LAME are all LGPL,
-    # and an app.so that ships as one blob nobody can relink is the worst
-    # case for LGPL section 6. Nothing in this engine is copyleft.
-    src/internal/pdmp2/pdmp2.c
-    src/internal/pdmp2/pdmp2_tables.c
-    src/internal/pdmp2/pdmp2_window.c
+    # pdmp2: the MPEG Layer II encoder behind se_stream's cfg.audio.
+    # A SUBMODULE, not a vendored copy -- github.com/nullislandspace/
+    # public-domain-mp2-encoder -- so its tests and the tool that measures
+    # its filterbank window come with it, and a fix goes upstream rather
+    # than into a copy. Its PROVENANCE.md says where every number in it
+    # came from. PUBLIC DOMAIN, which is the whole reason it was written:
+    # shine, twolame and LAME are all LGPL, and an app.so that ships as
+    # one blob nobody can relink is the worst case for LGPL section 6.
+    # Nothing in this engine is copyleft.
+    src/internal/pdmp2/src/pdmp2.c
+    src/internal/pdmp2/src/pdmp2_tables.c
+    src/internal/pdmp2/src/pdmp2_window.c
 )
+
+# A submodule that was never checked out fails as a hundred missing-header
+# errors deep in a build log. Say it once, at the top, in words.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/internal/pdmp2/src/pdmp2.c")
+    message(FATAL_ERROR
+        "src/internal/pdmp2 is empty: the pdmp2 submodule is not checked out.\n"
+        "Run:  git submodule update --init --recursive")
+endif()
 
 # TinyUSB, vendored (src/internal/tinyusb/PROVENANCE.md). ONLY IN APP
 # MODE: under the IDF the host (graceloader, the launcher) already has a
@@ -66,6 +78,7 @@ if(COMMAND idf_component_register)
         SRCS ${SE_SRCS}
         INCLUDE_DIRS "include"
         PRIV_INCLUDE_DIRS "src" "src/internal" "src/internal/tinyusb/src"
+                          "src/internal/pdmp2/include" "src/internal/pdmp2/src"
         # esp_driver_ppa: the PPA peripheral driver (se_ppa.c);
         # esp_mm: esp_cache_msync for the PPA layer-cache flush.
         REQUIRES freertos esp_driver_ppa esp_mm
@@ -92,6 +105,8 @@ else()
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/tinyusb/src
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/pdmp2/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/internal/pdmp2/src
                 ${CMAKE_SOURCE_DIR}/include
                 ${CMAKE_SOURCE_DIR}/include/esp_additions/include
     )

@@ -26,7 +26,7 @@ static size_t   s_read;     // samples the encoder has taken
 static uint64_t s_samples;  // frames of PCM ever accepted, for the PTS
 static bool     s_ready;
 
-// The codec: pdmp2, vendored (pdmp2/PROVENANCE.md). Public domain, which
+// The codec: pdmp2, a submodule (pdmp2/PROVENANCE.md). Public domain, which
 // is the entire reason it exists -- every other MPEG audio encoder worth
 // using is LGPL, and this engine ships as one relinked-by-nobody blob.
 //
@@ -38,7 +38,7 @@ static bool     s_ready;
 // 576 and picking the wrong one does not fail loudly, it simply never
 // lines up and the audio quietly never starts.
 #ifdef SE_STREAM_AUDIO_CODEC
-#include "pdmp2/pdmp2.h"
+#include "pdmp2.h"
 
 // Generous: the link is USB and the video beside it is twenty times this.
 // 160 is LSF Layer II's ceiling; 128 leaves headroom and is transparent

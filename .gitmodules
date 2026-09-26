@@ -1,0 +1,4 @@
+[submodule "src/internal/pdmp2"]
+	path = src/internal/pdmp2
+	url = git@github.com:nullislandspace/public-domain-mp2-encoder.git
+	branch = main
