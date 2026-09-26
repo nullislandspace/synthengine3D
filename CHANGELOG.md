@@ -19,6 +19,61 @@ new way throughout, including entries written before the rename: the
 measurements are the same measurements, and a name nobody can look up
 helps no one. Nothing in the engine changed for it.
 
+## [2.3] — 2026-09-26
+
+### Changed — `se_stream.h`, `cfg.audio` now actually carries audio
+
+No public signature moved. What changed is that asking for audio gets
+audio: `se_stream_start()` with `cfg.audio` set used to log "no audio in
+this stream; video only" and degrade, because the plumbing was finished
+and there was no encoder behind it.
+
+There is now: **pdmp2**, an MPEG-1/2 Layer II encoder written for this,
+in the public domain. `src/internal/pdmp2/PROVENANCE.md` records where
+every number in it came from, and upstream is
+`github.com/nullislandspace/public-domain-mp2-encoder`.
+
+**Why write one.** Every MPEG audio encoder worth vendoring — shine,
+twolame, LAME — is LGPL. That is workable for an application and awkward
+for a library, and an `app.so` that ships as a single blob nobody can
+relink is close to the worst case for LGPL section 6: the relinking
+obligation is the one it is hardest to honour. Everything else this
+engine vendors is permissive (minimp3 is CC0, TinyUSB is MIT), and now so
+is all of it.
+
+**MPEG-2 LSF Layer II at 22050 Hz**, the mixer's own rate, so nothing is
+resampled between the speaker and the stream. LSF Layer II also has
+exactly one bit allocation table, so there is no rate-dependent table
+selection to get wrong. A Layer II frame is 1152 samples a channel at
+every rate — worth stating because Layer III's LSF frame is 576, and
+picking the wrong number does not fail loudly, it never lines up and the
+audio quietly never starts. 128 kbit/s, on a link where the video beside
+it is twenty times that.
+
+The muxer's PMT now announces stream_type **0x04** (ISO/IEC 13818-3)
+rather than 0x03, because what it carries is MPEG-2 LSF and the PMT
+should not contradict the frame headers. Both map to the same decoder in
+practice; this one is correct.
+
+Measured on the host rather than assumed: the encoder is round-tripped
+through a reference decoder at six rate/channel/bitrate combinations and
+beats ffmpeg's own MP2 encoder on 23 of 24 signal cases, at a level ratio
+of 1.0000. The full path — encoder into the muxer into a `.ts` — is
+checked too: `mp2 / 0x0004, 22050 Hz, stereo, 128 kb/s`, tones back at
+1001 Hz and 439 Hz in the correct channels. The encoder's ~35 KB working
+set is in PSRAM (`src/internal/pdmp2_port.h`); internal SRAM is the
+scarce thing on this badge and the encoder touches those buffers once per
+52 ms frame.
+
+Two things this cost that are worth not learning twice, both recorded at
+length in the upstream PROVENANCE.md: the Layer II **syncword is 12 bits,
+not 11** (with `ID = 1` both readings give the same first two bytes, so
+the mistake builds a working MPEG-1 encoder and a broken MPEG-2 one), and
+**the analysis window is not a design choice** — a pseudo-QMF bank only
+reconstructs if the analysis prototype is the time reverse of the
+decoder's synthesis prototype, so a well-designed window measured 16 dB
+SNR and a measured one measures 64.
+
 ## [2.2] — 2026-09-25
 
 ### Added — `se_stream.h`, live A/V streaming to a PC

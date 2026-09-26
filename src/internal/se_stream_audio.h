@@ -9,27 +9,27 @@
 //       from the mixer task. That is a real-time task feeding a DMA, so
 //       this copies and returns -- it never encodes there;
 //    2. the RING, because a mixer chunk is 256 frames (~11.6 ms at
-//       22050) and an MPEG audio frame is 1152, so they do not line up
-//       and something has to hold the remainder;
+//       22050) and a Layer II frame is 1152 (~52 ms), so they do not
+//       line up and something has to hold the remainder;
 //    3. the ENCODER, run by the stream task, which turns whole frames
 //       into MPEG audio and stamps them with a PTS taken from the
 //       SAMPLE COUNT -- not from a clock. Audio that is timed by
 //       counting what was actually played cannot drift against itself.
 //
-//  THE MIXER RUNS AT 22050 Hz, STEREO (AUDIO_SAMPLE_RATE_HZ). Whether
-//  that is what goes out depends on the codec: MPEG-1 Layer II wants
-//  32/44.1/48 kHz, so it would need a x2 upsample (exact, 22050*2 =
-//  44100); MPEG-2 Layer III takes 22050 as it is.
+//  THE MIXER RUNS AT 22050 Hz, STEREO (AUDIO_SAMPLE_RATE_HZ), AND THAT
+//  IS WHAT GOES OUT. 22050 is an MPEG-2 LSF rate and LSF Layer II takes
+//  it directly, so nothing is resampled between the speaker and the
+//  stream -- and LSF Layer II has exactly one bit allocation table,
+//  so there is no rate-dependent table selection to get wrong.
 //
-//  WHY THERE IS NO CODEC HERE YET. Every MPEG audio encoder worth
-//  vendoring -- shine, twolame, lame -- is LGPL, and everything this
-//  engine vendors so far is permissive (minimp3 is public domain,
-//  TinyUSB is MIT). Writing a conforming one instead means the 512-tap
-//  analysis window and the quantisation tables, which are not the sort
-//  of thing to reproduce from memory: wrong, they decode as plausible
-//  noise. So the plumbing is here and the codec is a decision (D-96).
-//  Until it is made, se_stream_audio_prepare() answers honestly and the
-//  stream carries video alone.
+//  THE CODEC IS PUBLIC DOMAIN, AND THAT TOOK WRITING ONE. Every MPEG
+//  audio encoder worth vendoring -- shine, twolame, lame -- is LGPL,
+//  and everything else this engine vendors is permissive (minimp3 is
+//  CC0, TinyUSB is MIT). An app.so that ships as a single blob nobody
+//  can relink is close to the worst case for LGPL section 6, so the
+//  encoder was written instead: see pdmp2/PROVENANCE.md for where every
+//  table in it came from, and why the filterbank window had to be
+//  measured rather than designed.
 // =====================================================================
 
 #include <stdbool.h>

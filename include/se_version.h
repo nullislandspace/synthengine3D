@@ -22,7 +22,7 @@
 // =====================================================================
 
 #define SE_VERSION_MAJOR 2
-#define SE_VERSION_MINOR 2
+#define SE_VERSION_MINOR 3
 
 // Returns the engine version as a static "MAJOR.MINOR" string.
 // Never NULL; the storage is static and outlives the call.

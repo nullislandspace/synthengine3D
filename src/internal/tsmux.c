@@ -8,7 +8,11 @@
 #define PID_PAT        0x0000
 #define PROGRAM_NUMBER 1
 #define STREAM_H264    0x1B
-#define STREAM_MPEG1_AUDIO 0x03
+// 0x04 is ISO/IEC 13818-3 audio, which is what MPEG-2 LSF Layer II at
+// 22050 Hz is. 0x03 (11172-3, MPEG-1) also plays in practice because
+// both map to the same decoder, but the header we emit says LSF and the
+// PMT should not disagree with it.
+#define STREAM_MPEG2_AUDIO 0x04
 
 // An access unit delimiter: nal_unit_type 9, primary_pic_type 7 ("any"),
 // then the rbsp stop bit.
@@ -112,7 +116,7 @@ static void write_tables(tsmux_t* m) {
     pmt[n++] = 0xF0;  // ES_info_length 0
     pmt[n++] = 0x00;
     if (m->audio) {
-        pmt[n++] = STREAM_MPEG1_AUDIO;
+        pmt[n++] = STREAM_MPEG2_AUDIO;
         pmt[n++] = (uint8_t)(0xE0 | (TSMUX_PID_AUDIO >> 8));
         pmt[n++] = TSMUX_PID_AUDIO & 0xFF;
         pmt[n++] = 0xF0;  // ES_info_length 0

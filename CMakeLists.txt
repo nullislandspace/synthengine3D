@@ -37,6 +37,14 @@ set(SE_SRCS
     src/internal/netraw.c  # E8: ARP/ICMP/DHCP/UDP for the link
     src/internal/usbnet.c  # E8: the USB-C port as a CDC-NCM adapter
     src/internal/se_stream_audio.c  # E8: the mixer's output into the stream
+    # pdmp2, vendored (src/internal/pdmp2/PROVENANCE.md): the MPEG Layer
+    # II encoder behind se_stream's cfg.audio. PUBLIC DOMAIN, which is the
+    # whole reason it was written -- shine, twolame and LAME are all LGPL,
+    # and an app.so that ships as one blob nobody can relink is the worst
+    # case for LGPL section 6. Nothing in this engine is copyleft.
+    src/internal/pdmp2/pdmp2.c
+    src/internal/pdmp2/pdmp2_tables.c
+    src/internal/pdmp2/pdmp2_window.c
 )
 
 # TinyUSB, vendored (src/internal/tinyusb/PROVENANCE.md). ONLY IN APP
@@ -71,6 +79,11 @@ else()
     # the top-level CMakeLists.txt verbatim.
     # TinyUSB only here: see where SE_TINYUSB_SRCS is defined.
     add_library(synthengine3d OBJECT ${SE_SRCS} ${SE_TINYUSB_SRCS})
+    # PDMP2_CONFIG_H puts the encoder's ~35 KB working set in PSRAM
+    # (src/internal/pdmp2_port.h); internal SRAM is the scarce thing here.
+    target_compile_definitions(synthengine3d PRIVATE
+        SE_STREAM_AUDIO_CODEC=1
+        PDMP2_CONFIG_H="pdmp2_port.h")
     # Upstream code, kept byte-identical: its warnings are not ours.
     set_source_files_properties(${SE_TINYUSB_SRCS} PROPERTIES COMPILE_OPTIONS "-w")
 

@@ -15,7 +15,7 @@
 //    - an access unit delimiter in front of every access unit (the
 //      encoder does not write one; ffmpeg's parser likes to have it);
 //    - random_access_indicator on keyframes;
-//    - MPEG-1 Layer II audio on PID 0x101 (stream_type 0x03) when it is
+//    - MPEG-2 Layer II audio on PID 0x101 (stream_type 0x04) when it is
 //      switched on, one PES per audio frame, PTS only. The PCR stays on
 //      the video PID: one clock, and the picture is the thing whose
 //      timing a viewer notices.

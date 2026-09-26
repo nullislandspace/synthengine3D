@@ -246,7 +246,14 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
     }
     s_bs = heap_caps_aligned_calloc(64, 1, YUV_BYTES, MALLOC_CAP_SPIRAM);  // >= input, or the encoder refuses
     if (!s_bs) goto nomem;
-    if (s_cfg.audio && !se_stream_audio_prepare()) goto nomem;
+    // NO AUDIO IS NOT A FAILURE. The stream is worth having without it,
+    // and refusing the whole thing because a codec would not start is
+    // how a menu row ends up doing nothing at all for a reason nobody
+    // can see from the badge.
+    if (s_cfg.audio && !se_stream_audio_prepare()) {
+        ESP_LOGW(TAG, "no audio in this stream; video only");
+        s_cfg.audio = false;
+    }
 
     ppa_client_config_t const pcfg = {
         .oper_type             = PPA_OPERATION_SRM,
