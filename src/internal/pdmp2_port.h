@@ -74,3 +74,9 @@ static inline void* pdmp2_port_malloc_hot(size_t n) {
 }
 
 #define PDMP2_MALLOC_HOT(n) pdmp2_port_malloc_hot((n))
+
+// Phase timing on, so pdmp2_profile_get() reports where a frame's time went
+// (pdmp2.h). esp_timer_get_time() is microseconds and a handful of cycles to
+// read; at four reads a frame it is not measurable against a 6 ms encode.
+#include "esp_timer.h"
+#define PDMP2_TICKS() esp_timer_get_time()

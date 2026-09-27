@@ -121,14 +121,14 @@ bool se_stream_audio_prepare(void) {
     // sample is written once and read once, so a miss on it costs one miss.
     // s_flat is handed to the filterbank, which reads all 1152 samples of
     // it 36 times over -- it belongs with the encoder's other hot buffers.
-    {
-        size_t const want = (size_t)s_frame * CHANNELS * sizeof(int16_t);
-        // Same reserve as the codec's own hot buffers, and for the same
-        // reason: never take the internal memory the link still needs.
-        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) > want + PDMP2_PORT_INTERNAL_RESERVE)
-            s_flat = heap_caps_calloc(1, want, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (s_flat == NULL) s_flat = heap_caps_calloc(1, want, MALLOC_CAP_SPIRAM);
-    }
+    // PSRAM, and measured rather than assumed. I put this in internal SRAM
+    // first on the theory that the filterbank reads it 36 times over. It
+    // does not: encode_frame() converts it to float into the encoder's own
+    // pcm buffer in one sequential pass, and the filterbank reads THAT. The
+    // timed copy came out at 0.10-0.17 ms and never moved under load, so
+    // the internal RAM it was holding is worth more to the encoder's struct
+    // (pdmp2.c) and to the USB link.
+    s_flat = heap_caps_calloc(1, (size_t)s_frame * CHANNELS * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (s_pcm == NULL || s_flat == NULL) {
         heap_caps_free(s_pcm);
         heap_caps_free(s_flat);
@@ -260,5 +260,29 @@ bool se_stream_audio_take(uint8_t const** data, size_t* len, uint64_t* pts) {
     *data = enc;
     *len  = n;
     return true;
+#endif
+}
+
+// Where the codec's own time goes, straight out of pdmp2 (pdmp2.h). Split
+// because `analyse` reads the buffers that were moved into internal SRAM
+// while the other three sweep the subband array, which was not -- so which
+// group grows under load says whether the remaining cost is the data or the
+// code, and only one of those is fixable without moving app.so.
+void se_stream_audio_phases(uint64_t* an, uint64_t* scf, uint64_t* alloc, uint64_t* wr,
+                            uint32_t* n) {
+#ifdef SE_STREAM_AUDIO_CODEC
+    pdmp2_profile_t p;
+    pdmp2_profile_get(s_enc, &p);
+    if (an) *an = p.analyse;
+    if (scf) *scf = p.scalefactors;
+    if (alloc) *alloc = p.allocate;
+    if (wr) *wr = p.write;
+    if (n) *n = p.frames;
+#else
+    if (an) *an = 0;
+    if (scf) *scf = 0;
+    if (alloc) *alloc = 0;
+    if (wr) *wr = 0;
+    if (n) *n = 0;
 #endif
 }

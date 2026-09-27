@@ -127,6 +127,10 @@ typedef struct {
     uint32_t pass_us_max, pcr_us_max, amx_us_max;
     // The two halves of atk: the ring copy and the codec (pdmp2_port.h).
     uint32_t copy_sum, cenc_sum, cost_n;
+    // And the codec's own four phases (pdmp2.h). `an` is the filterbank,
+    // which reads only internal SRAM now; the other three sweep the subband
+    // array in PSRAM. Which of the two grows under load is the question.
+    uint32_t an_sum, scf_sum, alloc_sum, wr_sum, ph_n;
 } hist_t;
 
 static uint64_t s_ppa_us_sum, s_enc_us_sum, s_mux_us_sum, s_aud_us_sum;
@@ -179,6 +183,16 @@ static void hist_sample(void) {
         h->cenc_sum = (uint32_t)ce;
         h->cost_n   = cn;
     }
+    {
+        uint64_t an = 0, scf = 0, al = 0, wr = 0;
+        uint32_t pn = 0;
+        se_stream_audio_phases(&an, &scf, &al, &wr, &pn);
+        h->an_sum    = (uint32_t)an;
+        h->scf_sum   = (uint32_t)scf;
+        h->alloc_sum = (uint32_t)al;
+        h->wr_sum    = (uint32_t)wr;
+        h->ph_n      = pn;
+    }
     h->pass_us_max = s_pass_us_max;
     h->pcr_us_max  = s_pcr_us_max;
     h->amx_us_max  = s_amx_us_max;
@@ -200,13 +214,13 @@ static void hist_write(void) {
     fprintf(f, "ms pub drop enc key encerr ppaerr dgram dgfail pcronly aud auddrop eskb tskb "
                "ppamax encmax muxmax audmax ppasum ppan encsum encn muxsum muxn audsum audn "
                "passsum passn pcrsum pcrn atksum atkn amxsum amxn passmax pcrmax amxmax "
-               "copysum cencsum costn\n");
+               "copysum cencsum costn ansum scfsum allocsum wrsum phn\n");
     for (i = 0; i < s_hist_n; i++) {
         hist_t const* h = &s_hist[i];
         fprintf(f, "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu "
                    "%lu %lu %lu %lu %lu %lu %lu %lu "
                    "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu "
-                   "%lu %lu %lu\n",
+                   "%lu %lu %lu %lu %lu %lu %lu %lu\n",
                 (unsigned long)h->ms, (unsigned long)h->published, (unsigned long)h->dropped,
                 (unsigned long)h->frames, (unsigned long)h->keyframes,
                 (unsigned long)h->enc_errors, (unsigned long)h->ppa_errors,
@@ -226,7 +240,10 @@ static void hist_write(void) {
                 (unsigned long)h->pass_us_max, (unsigned long)h->pcr_us_max,
                 (unsigned long)h->amx_us_max,
                 (unsigned long)h->copy_sum, (unsigned long)h->cenc_sum,
-                (unsigned long)h->cost_n);
+                (unsigned long)h->cost_n,
+                (unsigned long)h->an_sum, (unsigned long)h->scf_sum,
+                (unsigned long)h->alloc_sum, (unsigned long)h->wr_sum,
+                (unsigned long)h->ph_n);
     }
     fclose(f);
     ESP_LOGI(TAG, "wrote %d samples to " HIST_PATH, s_hist_n);

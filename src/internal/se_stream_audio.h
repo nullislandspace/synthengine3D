@@ -72,3 +72,8 @@ bool se_stream_audio_take(uint8_t const** data, size_t* len, uint64_t* pts);
 // The cost of se_stream_audio_take(), split into the ring copy and the
 // codec. Cumulative microseconds since prepare(); see pdmp2_port.h.
 void se_stream_audio_cost(uint64_t* copy_us, uint64_t* enc_us, uint32_t* n);
+
+// Cumulative microseconds in each phase of the codec, and the frames they
+// cover. Zero when no codec is compiled in. See pdmp2.h.
+void se_stream_audio_phases(uint64_t* an, uint64_t* scf, uint64_t* alloc, uint64_t* wr,
+                            uint32_t* n);
