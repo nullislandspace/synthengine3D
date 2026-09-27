@@ -10,8 +10,11 @@
 //      joins late finds the program quickly;
 //    - H.264 on PID 0x100 (stream_type 0x1B), one PES per access unit,
 //      with PTS (no B-frames, so DTS = PTS and is left out);
-//    - the PCR on the video PID, in the first packet of every access
-//      unit, TSMUX_PCR_LEAD before its PTS;
+//    - the PCR on its OWN pid (TSMUX_PID_PCR), at a steady cadence set by
+//      TSMUX_PCR_MAX_GAP rather than by the video frame rate: a receiver
+//      recovers its clock from these, and a game's frame rate is far too
+//      erratic to be a clock. The video's adaptation field carries only
+//      the random access indicator now;
 //    - an access unit delimiter in front of every access unit (the
 //      encoder does not write one; ffmpeg's parser likes to have it);
 //    - the SPS and PPS in front of every access unit that does not carry
@@ -42,9 +45,18 @@
 #define TSMUX_PID_PMT         0x1000
 #define TSMUX_PID_VIDEO       0x0100
 #define TSMUX_PID_AUDIO       0x0101
+// The clock gets its OWN pid. Carrying it in the video stream's adaptation
+// field means clock packets land inside the video PES -- which is unbounded
+// here (PES_packet_length 0), so a receiver treats everything on that pid
+// until the next PES start as one packet, and ffmpeg calls every frame
+// "Packet corrupt". A separate pid keeps the two entirely apart.
+#define TSMUX_PID_PCR         0x0102
 #define TSMUX_TABLE_INTERVAL  15      // access units between PAT/PMT at most
 #define TSMUX_PARAMS_MAX      256     // room for one SPS + one PPS, with start codes
 #define TSMUX_PCR_LEAD        9000    // 100 ms, in 90 kHz ticks
+// Longest the clock may go unsampled. 13818-1 allows 100 ms and DVB asks
+// for 40; this is 40, because the cost is one 188-byte packet.
+#define TSMUX_PCR_MAX_GAP     3600    // 40 ms, in 90 kHz ticks
 
 // Called for every finished datagram (1..7 packets); returns false if it
 // could not be sent (counted, the muxer carries on).
@@ -69,6 +81,9 @@ typedef struct {
     uint32_t     dgrams;
     uint32_t     dgrams_failed;
     uint32_t     params_sent;  // access units given the cached SPS/PPS
+    uint32_t     pcr_only;     // clock-only packets sent between frames
+    uint64_t     pcr_last;     // value of the last PCR emitted
+    bool         pcr_valid;
     uint64_t     bytes;        // datagram bytes handed to emit
 } tsmux_t;
 
@@ -87,6 +102,12 @@ void tsmux_write(tsmux_t* m, uint8_t const* au, size_t len, uint64_t pts, bool k
 // is in 90 kHz ticks. No tables and no PCR: audio rides the clock the
 // video already carries.
 void tsmux_write_audio(tsmux_t* m, uint8_t const* frame, size_t len, uint64_t pts);
+
+// Send a clock-only packet if none has gone out for TSMUX_PCR_MAX_GAP.
+// `now_pts` is the PTS a frame captured at this instant would carry; the
+// lead is subtracted here, as it is for a frame. Cheap and idempotent --
+// call it every time round the stream loop.
+void tsmux_pcr_if_due(tsmux_t* m, uint64_t now_pts);
 
 // The MPEG-2 CRC32 of PSI sections (poly 0x04C11DB7, not reflected).
 uint32_t tsmux_crc32(uint8_t const* data, size_t len);

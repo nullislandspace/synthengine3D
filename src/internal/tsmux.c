@@ -115,6 +115,18 @@ static uint8_t* next_packet(tsmux_t* m) {
     return p;
 }
 
+// The 48-bit PCR field: 33-bit base at 90 kHz, 6 reserved bits, 9-bit
+// extension at 27 MHz (left at zero -- nothing here needs 27 MHz).
+static void put_pcr(uint8_t* d, uint64_t base) {
+    base &= 0x1FFFFFFFFull;
+    d[0] = (uint8_t)(base >> 25);
+    d[1] = (uint8_t)(base >> 17);
+    d[2] = (uint8_t)(base >> 9);
+    d[3] = (uint8_t)(base >> 1);
+    d[4] = (uint8_t)(((base & 1) << 7) | 0x7E);  // reserved 6 bits, ext high
+    d[5] = 0x00;                                  // ext low
+}
+
 static void header(uint8_t* p, uint16_t pid, bool pusi, uint8_t afc, uint8_t cc) {
     p[0] = 0x47;
     p[1] = (uint8_t)((pusi ? 0x40 : 0) | ((pid >> 8) & 0x1F));
@@ -166,8 +178,8 @@ static void write_tables(tsmux_t* m) {
     pmt[n++] = 0xC1;
     pmt[n++] = 0x00;
     pmt[n++] = 0x00;
-    pmt[n++] = (uint8_t)(0xE0 | (TSMUX_PID_VIDEO >> 8));  // PCR_PID
-    pmt[n++] = TSMUX_PID_VIDEO & 0xFF;
+    pmt[n++] = (uint8_t)(0xE0 | (TSMUX_PID_PCR >> 8));  // PCR_PID: its own
+    pmt[n++] = TSMUX_PID_PCR & 0xFF;
     pmt[n++] = 0xF0;  // program_info_length 0
     pmt[n++] = 0x00;
     pmt[n++] = STREAM_H264;
@@ -273,7 +285,7 @@ void tsmux_write(tsmux_t* m, uint8_t const* au, size_t len, uint64_t pts, bool k
         bool   has_af = false;
         if (first) {
             has_af = true;
-            af_len = 1 + 6;  // flags + PCR
+            af_len = 1;  // flags only: the clock lives on TSMUX_PID_PCR now
         }
         size_t room = TSMUX_PACKET - 4 - (has_af ? 1 + af_len : 0);
         if (left < room) {
@@ -295,17 +307,8 @@ void tsmux_write(tsmux_t* m, uint8_t const* au, size_t len, uint64_t pts, bool k
             if (af_len > 0) {
                 size_t const af_start = o;
                 uint8_t      flags    = 0;
-                if (first) flags |= 0x10 | (keyframe ? 0x40 : 0);  // PCR_flag, random_access_indicator
+                if (first && keyframe) flags |= 0x40;  // random_access_indicator
                 p[o++] = flags;
-                if (first) {
-                    uint64_t const base = (pts - TSMUX_PCR_LEAD) & 0x1FFFFFFFFull;
-                    p[o++]              = (uint8_t)(base >> 25);
-                    p[o++]              = (uint8_t)(base >> 17);
-                    p[o++]              = (uint8_t)(base >> 9);
-                    p[o++]              = (uint8_t)(base >> 1);
-                    p[o++]              = (uint8_t)(((base & 1) << 7) | 0x7E);  // reserved 6 bits, extension hi
-                    p[o++]              = 0x00;                                 // extension lo
-                }
                 memset(p + o, 0xFF, af_start + af_len - o);
                 o = af_start + af_len;
             }
@@ -368,5 +371,56 @@ void tsmux_write_audio(tsmux_t* m, uint8_t const* frame, size_t len, uint64_t pt
         src_copy(&src, p + o, TSMUX_PACKET - o);
         first = false;
     }
+    // NO FLUSH. An MP2 frame is under a kilobyte, so flushing here bought
+    // each one its OWN datagram -- nineteen a second of part-filled
+    // datagrams on a full-speed USB link, where a send can block for two
+    // ticks. Letting them ride in the next datagram costs at most the gap
+    // to the next flush, which the clock guarantees is 40 ms
+    // (tsmux_pcr_if_due), and removes those sends entirely.
+}
+
+// WHY A PCR ON A TIMER AND NOT JUST ONE PER FRAME.
+//
+// A receiver does not trust its own clock: it recovers a System Time Clock
+// from the PCR samples in the stream and schedules BOTH audio and video
+// presentation against it. The spec bounds the PCR interval at 100 ms for
+// that reason, and DVB tightens it to 40, because a PLL needs its samples
+// frequent and regular.
+//
+// A PCR carried only by access units has the frame rate for a cadence. A
+// game's frame rate is not a cadence: it varies frame to frame with what is
+// being drawn, and below ten frames a second it is out of spec outright.
+// Video survives that easily -- a player just shows each frame when it is
+// due, and a compositor like OBS resamples to its own rate. AUDIO DOES NOT:
+// it has to come out continuously at its sample rate, scheduled against
+// that same jittery clock, which is what "max audio buffering reached" and
+// "restarting source audio" mean when a receiver says them.
+//
+// So the clock gets its own cadence, independent of rendering. Call this
+// often -- once round the stream task's loop is right -- with the PTS a
+// frame captured at this instant would carry.
+void tsmux_pcr_if_due(tsmux_t* m, uint64_t now_pts) {
+    uint64_t const pcr = now_pts - TSMUX_PCR_LEAD;
+    uint8_t*       p;
+    if (now_pts < TSMUX_PCR_LEAD) return;
+    // Never go backwards: frames are stamped at capture and may be muxed
+    // slightly after, so a naive "now" can be behind the last PCR sent.
+    if (m->pcr_valid && (int64_t)(pcr - m->pcr_last) < (int64_t)TSMUX_PCR_MAX_GAP) return;
+
+    // Adaptation field only, no payload -- which is also why the continuity
+    // counter must NOT advance here: it counts payload packets, and a
+    // receiver that sees it jump treats the stream as having lost one.
+    p = next_packet(m);
+    header(p, TSMUX_PID_PCR, false, 2, 0);
+    p[4] = TSMUX_PACKET - 5;  // adaptation_field_length: fills the packet
+    p[5] = 0x10;              // PCR_flag
+    put_pcr(p + 6, pcr);
+    memset(p + 12, 0xFF, TSMUX_PACKET - 12);
+
+    m->pcr_last  = pcr;
+    m->pcr_valid = true;
+    m->pcr_only++;
+    // Out now, not when the next frame fills the datagram: a clock sample
+    // that waits for a video frame is the problem this exists to solve.
     flush(m);
 }

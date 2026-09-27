@@ -41,11 +41,34 @@
 bool se_stream_audio_prepare(void);
 void se_stream_audio_free(void);
 
+// THROW AWAY WHATEVER IS QUEUED AND RESTART THE CLOCK. Call it at the
+// instant the consumer starts, which is not the instant prepare() ran:
+// bringing the USB link up takes time, the mixer is already filling the
+// ring throughout, and the first frame taken out is therefore that stale
+// while being stamped as current. That is a CONSTANT audio delay of
+// however long the gap was -- measured at about 850 ms on this badge,
+// which is enough for OBS to give up buffering and restart its source
+// audio over and over.
+void se_stream_audio_reset(void);
+
 // From the MIXER TASK: `n` frames of interleaved stereo int16, as they
-// went to the I2S. False if the ring is full (counted by the caller as
-// a drop; the stream skips, the game is not held up).
+// went to the I2S. Never blocks and never refuses: if the consumer has
+// fallen behind, this OVERWRITES what it has not read yet, and the
+// consumer accounts for the loss so the audio clock stays true. Refusing
+// instead -- which is what this used to do -- shortens the audio timeline
+// by every dropped chunk, and that error accumulates without bound.
 bool se_stream_audio_push(int16_t const* frames, size_t n);
+
+// Frames of PCM the writer overwrote before the consumer read them. Each
+// one is a gap in the sound AND a sample the timeline accounted for
+// anyway; a number that keeps climbing means the ring is too shallow or
+// the stream task is not getting to run.
+uint64_t se_stream_audio_lost(void);
 
 // From the STREAM TASK: the next encoded frame, if a whole one is
 // ready. `pts` is in 90 kHz ticks, from the sample count.
 bool se_stream_audio_take(uint8_t const** data, size_t* len, uint64_t* pts);
+
+// The cost of se_stream_audio_take(), split into the ring copy and the
+// codec. Cumulative microseconds since prepare(); see pdmp2_port.h.
+void se_stream_audio_cost(uint64_t* copy_us, uint64_t* enc_us, uint32_t* n);

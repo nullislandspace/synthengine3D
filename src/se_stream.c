@@ -9,6 +9,7 @@
 
 #include "se_stream.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/ppa.h"
@@ -32,10 +33,31 @@
 #define YUV_BYTES (OUT_W * OUT_H * 3 / 2)
 #define PORT      5000
 
-#define STREAM_PRIO 5  // below usbnet (10), on its core
+// Below usbnet (10), which only moves bytes, and below the mixer, which
+// must feed a DMA. ABOVE whatever the game runs on this core: a game task
+// that outranks this one does not slow the stream down, it stops the
+// stream's CPU altogether -- see the note on WORKER_PRIO in the game's
+// chunk_worker.c for what that looked like when measured.
+#define STREAM_PRIO 5
 #define STREAM_CORE 1
 #define TASK_STACK  6144
 #define SEND_WAIT   2  // ticks a datagram may wait for room in the ring
+// Audio frames one pass of the stream loop may encode before it must let
+// the video have a turn.
+//
+// THIS WAS THREE, AND THREE STARVED THE AUDIO. It was set to guard against
+// a livelock if encoding 52 ms of audio took longer than 52 ms -- and then
+// measurement said pdmp2 encodes a frame in 71 MICROSECONDS, 700 times
+// faster than real time, so that livelock was never possible. What the
+// bound did instead was couple the audio's delivery rate to the video
+// loop's: at two iterations a second, three frames a pass is six a second
+// against the nineteen audio needs, and 36% of the sound went missing.
+//
+// Eight is ~418 ms of catch-up. At 71 us a frame plus packet building --
+// and no datagram of its own any more (tsmux_write_audio) -- a full burst
+// costs well under a millisecond, so the bound is a backstop rather than a
+// throttle.
+#define AUDIO_BURST_MAX 8
 
 // TWO YUV PLANES, not three framebuffers. The game's framebuffer is
 // never handed over -- it is read by the PPA while the caller still owns
@@ -62,6 +84,153 @@ static uint32_t              s_seq;
 // note where the video PTS is computed.
 static int64_t               s_cap_us[NYUV];
 static int64_t               s_t0_us;
+
+/* ------------------------------------------------------------------ *
+ *  DIAGNOSTIC HISTORY -- temporary, and here for one reason: while the
+ *  stream runs there is no console, no BadgeLink and no log, and the
+ *  console comes back too slowly after the stream ends to catch anything
+ *  printed at that moment. So the counters are SAMPLED INTO RAM while
+ *  streaming and written to a file on the card once it stops.
+ *
+ *  Nothing touches the card while the stream is running, deliberately: a
+ *  FatFs write can block for tens of milliseconds and would be perfectly
+ *  capable of causing the stall it is supposed to be measuring.
+ * ------------------------------------------------------------------ */
+#define HIST_MAX       4096            /* 4096 * 250 ms = 17 minutes */
+#define HIST_PERIOD_US 250000
+#define HIST_PATH      "/sd/defuckinfo.txt"
+
+typedef struct {
+    uint32_t ms;
+    uint32_t published, dropped, frames, keyframes;
+    uint32_t enc_errors, ppa_errors;
+    uint32_t dgrams, dgrams_failed, pcr_only;
+    uint32_t audio_frames, audio_dropped;
+    uint32_t es_kb, ts_kb;
+    uint32_t ppa_us_max, enc_us_max, mux_us_max, aud_us_max;
+    // Sums and counts as well as maxima. READING ONLY MAXIMA SENT THIS
+    // INVESTIGATION DOWN A BLIND ALLEY TWICE: a single 222 ms frame looks
+    // identical to every frame taking 222 ms, and the two call for
+    // completely different fixes.
+    uint32_t ppa_sum, enc_sum, mux_sum, aud_sum;
+    uint32_t ppa_n, enc_n, mux_n, aud_n;
+    // CLOSING THE ACCOUNTING. The counters above measured 10 ms of work in
+    // a pass that took 1250 ms, which says only that the missing 1240 ms is
+    // somewhere they do not look. Three calls in the loop were untimed and
+    // all three SEND -- the PCR, each audio frame's mux, and the take that
+    // encodes it -- so "blocked in the link" and "never scheduled" were
+    // indistinguishable. `pass` is top-of-loop to top-of-loop, so
+    // pass - (pcr + atk + amx + enc + mux) is the time the task was not
+    // running at all, and the two stop being a matter of opinion.
+    uint32_t pass_sum, pcr_sum, atk_sum, amx_sum;
+    uint32_t pass_n, pcr_n, atk_n, amx_n;
+    uint32_t pass_us_max, pcr_us_max, amx_us_max;
+    // The two halves of atk: the ring copy and the codec (pdmp2_port.h).
+    uint32_t copy_sum, cenc_sum, cost_n;
+} hist_t;
+
+static uint64_t s_ppa_us_sum, s_enc_us_sum, s_mux_us_sum, s_aud_us_sum;
+static uint32_t s_ppa_n, s_enc_n, s_mux_n, s_aud_n;
+static uint64_t s_pass_us_sum, s_pcr_us_sum, s_atk_us_sum, s_amx_us_sum;
+static uint32_t s_pass_n, s_pcr_n, s_atk_n, s_amx_n;
+static uint32_t s_pass_us_max, s_pcr_us_max, s_amx_us_max;
+
+static hist_t* s_hist;
+static int     s_hist_n;
+static int64_t s_hist_due_us;
+
+static void hist_sample(void) {
+    int64_t const now = esp_timer_get_time();
+    hist_t*       h;
+    if (s_hist == NULL || s_hist_n >= HIST_MAX || now < s_hist_due_us) return;
+    s_hist_due_us = now + HIST_PERIOD_US;
+    h             = &s_hist[s_hist_n++];
+    h->ms            = (uint32_t)((now - s_t0_us) / 1000);
+    h->published     = s_st.published;
+    h->dropped       = s_st.dropped;
+    h->frames        = s_st.frames;
+    h->keyframes     = s_st.keyframes;
+    h->enc_errors    = s_st.enc_errors;
+    h->ppa_errors    = s_st.ppa_errors;
+    h->dgrams        = s_st.dgrams;
+    h->dgrams_failed = s_st.dgrams_failed;
+    h->pcr_only      = s_mux.pcr_only;
+    h->audio_frames  = s_st.audio_frames;
+    h->audio_dropped = s_st.audio_dropped;
+    h->es_kb         = (uint32_t)(s_st.es_bytes / 1024u);
+    h->ts_kb         = (uint32_t)(s_st.ts_bytes / 1024u);
+    h->ppa_us_max    = s_st.ppa_us_max;
+    h->enc_us_max    = s_st.enc_us_max;
+    h->mux_us_max    = s_st.mux_us_max;
+    h->aud_us_max    = s_st.aud_us_max;
+    h->ppa_sum = (uint32_t)s_ppa_us_sum; h->ppa_n = s_ppa_n;
+    h->enc_sum = (uint32_t)s_enc_us_sum; h->enc_n = s_enc_n;
+    h->mux_sum = (uint32_t)s_mux_us_sum; h->mux_n = s_mux_n;
+    h->aud_sum = (uint32_t)s_aud_us_sum; h->aud_n = s_aud_n;
+    h->pass_sum = (uint32_t)s_pass_us_sum; h->pass_n = s_pass_n;
+    h->pcr_sum  = (uint32_t)s_pcr_us_sum;  h->pcr_n  = s_pcr_n;
+    h->atk_sum  = (uint32_t)s_atk_us_sum;  h->atk_n  = s_atk_n;
+    h->amx_sum  = (uint32_t)s_amx_us_sum;  h->amx_n  = s_amx_n;
+    {
+        uint64_t cp = 0, ce = 0;
+        uint32_t cn = 0;
+        se_stream_audio_cost(&cp, &ce, &cn);
+        h->copy_sum = (uint32_t)cp;
+        h->cenc_sum = (uint32_t)ce;
+        h->cost_n   = cn;
+    }
+    h->pass_us_max = s_pass_us_max;
+    h->pcr_us_max  = s_pcr_us_max;
+    h->amx_us_max  = s_amx_us_max;
+}
+
+/* Called from se_stream_stop(), after the link is down and before the
+ * buffers go, which is the first moment the card is safe to touch. */
+static void hist_write(void) {
+    FILE* f;
+    int   i;
+    if (s_hist == NULL || s_hist_n == 0) return;
+    f = fopen(HIST_PATH, "w");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "could not write " HIST_PATH);
+        return;
+    }
+    fprintf(f, "# SynthEngine3D stream counters, sampled every %d ms\n", HIST_PERIOD_US / 1000);
+    fprintf(f, "# cumulative; diff consecutive rows for rates\n");
+    fprintf(f, "ms pub drop enc key encerr ppaerr dgram dgfail pcronly aud auddrop eskb tskb "
+               "ppamax encmax muxmax audmax ppasum ppan encsum encn muxsum muxn audsum audn "
+               "passsum passn pcrsum pcrn atksum atkn amxsum amxn passmax pcrmax amxmax "
+               "copysum cencsum costn\n");
+    for (i = 0; i < s_hist_n; i++) {
+        hist_t const* h = &s_hist[i];
+        fprintf(f, "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu "
+                   "%lu %lu %lu %lu %lu %lu %lu %lu "
+                   "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu "
+                   "%lu %lu %lu\n",
+                (unsigned long)h->ms, (unsigned long)h->published, (unsigned long)h->dropped,
+                (unsigned long)h->frames, (unsigned long)h->keyframes,
+                (unsigned long)h->enc_errors, (unsigned long)h->ppa_errors,
+                (unsigned long)h->dgrams, (unsigned long)h->dgrams_failed,
+                (unsigned long)h->pcr_only, (unsigned long)h->audio_frames,
+                (unsigned long)h->audio_dropped, (unsigned long)h->es_kb, (unsigned long)h->ts_kb,
+                (unsigned long)h->ppa_us_max, (unsigned long)h->enc_us_max,
+                (unsigned long)h->mux_us_max, (unsigned long)h->aud_us_max,
+                (unsigned long)h->ppa_sum, (unsigned long)h->ppa_n,
+                (unsigned long)h->enc_sum, (unsigned long)h->enc_n,
+                (unsigned long)h->mux_sum, (unsigned long)h->mux_n,
+                (unsigned long)h->aud_sum, (unsigned long)h->aud_n,
+                (unsigned long)h->pass_sum, (unsigned long)h->pass_n,
+                (unsigned long)h->pcr_sum, (unsigned long)h->pcr_n,
+                (unsigned long)h->atk_sum, (unsigned long)h->atk_n,
+                (unsigned long)h->amx_sum, (unsigned long)h->amx_n,
+                (unsigned long)h->pass_us_max, (unsigned long)h->pcr_us_max,
+                (unsigned long)h->amx_us_max,
+                (unsigned long)h->copy_sum, (unsigned long)h->cenc_sum,
+                (unsigned long)h->cost_n);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "wrote %d samples to " HIST_PATH, s_hist_n);
+}
 
 static bool emit(void* ctx, uint8_t const* d, size_t len) {
     (void)ctx;
@@ -126,6 +295,8 @@ void se_stream_frame(pax_buf_t* fb) {
     }
     uint32_t const us = (uint32_t)(esp_timer_get_time() - t0);
     if (us > s_st.ppa_us_max) s_st.ppa_us_max = us;
+    s_ppa_us_sum += us;
+    s_ppa_n++;
 
     // Published last, and only now: until this line the stream task has
     // no claim on the buffer.
@@ -144,30 +315,86 @@ void se_stream_frame(pax_buf_t* fb) {
 void se_stream_tap(int16_t const* frames, size_t n) {
     if (!s_run || !s_cfg.audio || frames == NULL) return;
     int64_t const t0 = esp_timer_get_time();
-    if (!se_stream_audio_push(frames, n)) {
-        s_st.audio_dropped++;
-        return;
-    }
+    (void)se_stream_audio_push(frames, n);  // never refuses; see the header
     uint32_t const us = (uint32_t)(esp_timer_get_time() - t0);
     if (us > s_st.aud_us_max) s_st.aud_us_max = us;
+    s_aud_us_sum += us;
+    s_aud_n++;
 }
 
 // --- the stream task: everything expensive ------------------------------
 
 static void stream_task(void* arg) {
     (void)arg;
+    int64_t last_top_us = 0;
     while (s_run) {
-        // Audio first and always: its frames are small and its clock is
-        // the one a player trusts. A picture that arrives late is a
-        // glitch; sound that arrives late is a gap.
+        // Top-of-loop to top-of-loop. Everything else in here is a
+        // component of this number, and what it does not account for is
+        // time the task spent off the CPU.
+        int64_t const top_us = esp_timer_get_time();
+        if (last_top_us != 0) {
+            uint32_t const pass = (uint32_t)(top_us - last_top_us);
+            if (pass > s_pass_us_max) s_pass_us_max = pass;
+            s_pass_us_sum += pass;
+            s_pass_n++;
+        }
+        last_top_us = top_us;
+
+        // THE CLOCK FIRST, because it is the thing everything else is
+        // scheduled against and it must not inherit the game's frame rate
+        // as its cadence (tsmux.c, tsmux_pcr_if_due). Cheap: it sends a
+        // packet only when one is actually due -- but "cheap" was an
+        // assumption until it was timed, and it flushes, which means it
+        // sends, which means it can block.
+        tsmux_pcr_if_due(&s_mux, 90000 + (uint64_t)((top_us - s_t0_us) * 9 / 100));
+        {
+            uint32_t const us = (uint32_t)(esp_timer_get_time() - top_us);
+            if (us > s_pcr_us_max) s_pcr_us_max = us;
+            s_pcr_us_sum += us;
+            s_pcr_n++;
+        }
+        hist_sample();
+
+        // Audio next: its frames are small and it has a real-time deadline
+        // the video does not. A picture that arrives late is a glitch;
+        // sound that arrives late is a gap.
+        //
+        // BOUNDED, AND THAT BOUND IS NOT A TUNING PARAMETER. This loop used
+        // to drain until the ring was empty, which is a livelock waiting for
+        // a slow encoder: each pass consumes AUDIO_BURST_MAX * 52 ms of
+        // audio, and if encoding 52 ms of audio takes longer than 52 ms the
+        // mixer refills faster than the loop empties, the loop never exits,
+        // and the video below never runs at all. That is not a stutter, it
+        // is a picture that lags and then stops -- which is exactly what it
+        // did, and it went away entirely with cfg.audio off.
+        //
+        // With a bound, a too-slow encoder loses audio samples instead of
+        // the whole video stream, and the ring's lap accounting keeps the
+        // clock honest about it (se_stream_audio.c).
         if (s_cfg.audio) {
             uint8_t const* ab = NULL;
             size_t         an = 0;
             uint64_t       apts = 0;
-            while (se_stream_audio_take(&ab, &an, &apts)) {
+            int            burst = 0;
+            for (;;) {
+                int64_t const ta = esp_timer_get_time();
+                bool const    got = burst < AUDIO_BURST_MAX
+                                 && se_stream_audio_take(&ab, &an, &apts);
+                int64_t const tb = esp_timer_get_time();
+                s_atk_us_sum += (uint32_t)(tb - ta);
+                s_atk_n++;
+                if (!got) break;
                 tsmux_write_audio(&s_mux, ab, an, apts);
+                {
+                    uint32_t const us = (uint32_t)(esp_timer_get_time() - tb);
+                    if (us > s_amx_us_max) s_amx_us_max = us;
+                    s_amx_us_sum += us;
+                    s_amx_n++;
+                }
                 s_st.audio_frames++;
+                burst++;
             }
+            s_st.audio_dropped = (uint32_t)se_stream_audio_lost();
         }
 
         int const b = s_ready;
@@ -227,6 +454,10 @@ static void stream_task(void* arg) {
         uint32_t const enc = (uint32_t)(t2 - t1), mux = (uint32_t)(t3 - t2);
         if (enc > s_st.enc_us_max) s_st.enc_us_max = enc;
         if (mux > s_st.mux_us_max) s_st.mux_us_max = mux;
+        s_enc_us_sum += enc;
+        s_enc_n++;
+        s_mux_us_sum += mux;
+        s_mux_n++;
     }
     s_done = true;
     vTaskDelete(NULL);
@@ -235,6 +466,8 @@ static void stream_task(void* arg) {
 // --- set up and tear down -----------------------------------------------
 
 static void free_all(void) {
+    heap_caps_free(s_hist);
+    s_hist = NULL;
     if (s_enc) {
         esp_h264_enc_close(s_enc);
         esp_h264_enc_del(s_enc);
@@ -272,15 +505,15 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
     }
     s_bs = heap_caps_aligned_calloc(64, 1, YUV_BYTES, MALLOC_CAP_SPIRAM);  // >= input, or the encoder refuses
     if (!s_bs) goto nomem;
-    // NO AUDIO IS NOT A FAILURE. The stream is worth having without it,
-    // and refusing the whole thing because a codec would not start is
-    // how a menu row ends up doing nothing at all for a reason nobody
-    // can see from the badge.
-    if (s_cfg.audio && !se_stream_audio_prepare()) {
-        ESP_LOGW(TAG, "no audio in this stream; video only");
-        s_cfg.audio = false;
-    }
-
+    // Diagnostic history; not fatal if it will not fit.
+    s_hist        = heap_caps_calloc(HIST_MAX, sizeof(hist_t), MALLOC_CAP_SPIRAM);
+    s_hist_n      = 0;
+    s_hist_due_us = 0;
+    s_ppa_us_sum = s_enc_us_sum = s_mux_us_sum = s_aud_us_sum = 0;
+    s_ppa_n = s_enc_n = s_mux_n = s_aud_n = 0;
+    s_pass_us_sum = s_pcr_us_sum = s_atk_us_sum = s_amx_us_sum = 0;
+    s_pass_n = s_pcr_n = s_atk_n = s_amx_n = 0;
+    s_pass_us_max = s_pcr_us_max = s_amx_us_max = 0;
     ppa_client_config_t const pcfg = {
         .oper_type             = PPA_OPERATION_SRM,
         .max_pending_trans_num = 1,
@@ -302,6 +535,33 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
         free_all();
         return ESP_FAIL;
     }
+    // AUDIO LAST OF THE ALLOCATORS, AND AFTER THE ENCODER ON PURPOSE.
+    // pdmp2 wants about 16 KB of internal SRAM for its filterbank tables
+    // (pdmp2_port.h) and so does the hardware H.264 encoder for its DMA
+    // buffers. With this call first, a tight internal heap made
+    // esp_h264_enc_open() fail and the whole stream refused to start --
+    // the menu row simply would not tick, with the picture sacrificed to
+    // the sound (F-106). This way the codec takes what is left and falls
+    // back to PSRAM, which costs audio quality of timing, not the stream.
+    //
+    // NO AUDIO IS NOT A FAILURE. The stream is worth having without it,
+    // and refusing the whole thing because a codec would not start is
+    // how a menu row ends up doing nothing at all for a reason nobody
+    // can see from the badge.
+    ESP_LOGI(TAG, "internal heap before audio: %u B free, %u B largest block",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (s_cfg.audio && !se_stream_audio_prepare()) {
+        ESP_LOGW(TAG, "no audio in this stream; video only");
+        s_cfg.audio = false;
+    }
+    // What the link is left to work with. Logged because the last round
+    // guessed it: the reserve admitted two of the codec's three hot buffers
+    // and nothing said so (F-108).
+    ESP_LOGI(TAG, "internal heap after audio:  %u B free, %u B largest block",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
     tsmux_init(&s_mux, emit, NULL);
     tsmux_set_audio(&s_mux, s_cfg.audio);
 
@@ -327,6 +587,12 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
     // The stream's time origin. Every video PTS is measured from here, so
     // it must be set once, when the stream starts -- not per frame.
     s_t0_us = esp_timer_get_time();
+    // And the audio starts from the same instant. The mixer has been
+    // filling the ring since se_stream_audio_prepare(), all through USB
+    // enumeration, so without this the first frame out is several hundred
+    // milliseconds old and stamped as current -- a constant delay between
+    // sound and picture for the life of the stream.
+    if (s_cfg.audio) se_stream_audio_reset();
     s_done  = false;
     s_run   = true;
     xTaskCreatePinnedToCore(stream_task, "se_stream", TASK_STACK, NULL, STREAM_PRIO, NULL, STREAM_CORE);
@@ -357,6 +623,7 @@ void se_stream_stop(void) {
              (unsigned long)s_st.dgrams, (unsigned long)s_st.dgrams_failed,
              (unsigned long long)s_st.ts_bytes, (unsigned long)s_st.audio_frames,
              (unsigned long)s_st.audio_dropped);
+    hist_write();
     free_all();
     ESP_LOGI(TAG, "stream off: the console is back");
 }

@@ -70,7 +70,7 @@ typedef struct {
     uint32_t ppa_errors;
     uint64_t es_bytes;       // H.264 bytes out of the encoder
     uint32_t audio_frames;   // MPEG audio frames muxed
-    uint32_t audio_dropped;  // mixer chunks the encoder could not take
+    uint32_t audio_dropped;  // PCM frames overwritten before they were encoded
     uint32_t dgrams;
     uint32_t dgrams_failed;  // the link would not take them
     uint64_t ts_bytes;
