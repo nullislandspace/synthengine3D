@@ -19,6 +19,56 @@ new way throughout, including entries written before the rename: the
 measurements are the same measurements, and a name nobody can look up
 helps no one. Nothing in the engine changed for it.
 
+## [2.5] — 2026-09-29
+
+### Added — `se_scene.h`, `SE_TRI_BLEND`: half-transparent textured triangles
+
+A textured triangle can now be mixed 50/50 with what is already in the
+framebuffer instead of replacing it. Written for water in a voxel game,
+where the alternative was a cut-out checkerboard standing in for
+transparency.
+
+**The blend is the cheap half; the ORDERING is what the flag really
+buys.** Mixing only means anything if what is behind has already been
+drawn, and the depth-order pass sorts near-first so that an occluded
+pixel loses the depth test before it pays for a divide and a texel
+fetch — which is the opposite of what a blend needs. So a blended
+triangle is sorted after every opaque one, and far-to-near among
+themselves.
+
+That cost one bit and no extra pass. A positive float never sets its
+sign bit, so the top bit of the existing 16-bit depth key was always
+spare: opaque keys moved from `[0x8000, 0xFFFF]` down to `[0, 0x7FFF]`
+and kept their order exactly, and blended ones sit above all of them
+with their own order inverted. No second list, no second cap, no second
+sort.
+
+Three things in the span loop are worth knowing:
+
+* **It reads the framebuffer**, which no other run does. Every other
+  loop is write-only on it, which is why the framebuffer can sit in
+  PSRAM without hurting — writes are posted and the loop never waits.
+  It is cheaper than it looks, since the run walks contiguous addresses
+  and the write has already pulled the line in, but it is not free.
+* **The mix is done in native byte order**, unswapping the destination
+  first when the framebuffer is stored reversed. A right shift does not
+  commute with a byte swap — bit 8 crosses into the other byte — so
+  blending in stored order would mix green into red.
+* **Blended pixels write depth.** Besides layering a nearer surface
+  correctly, it kills a seam: the two triangles of a quad both cover
+  their shared edge, and the second finds its own depth already stored,
+  fails the strictly-greater test, and does not blend that line twice.
+  Without it every quad has a darker diagonal across it.
+
+A hole (`SE_TEXEL_CUTOUT`) still shows straight through, so a cut-out
+texture drawn blended behaves as it always did in its holes.
+
+**`se_ttri_t` gained a trailing `blend` byte.** Existing field offsets
+are unchanged and nothing a game reads has moved, so this is filed as
+MINOR: a game recompiling against these headers has nothing to change.
+A game that had hard-coded the struct's size would — there is none, and
+games pin the engine by submodule commit and rebuild both.
+
 ## [2.4] — 2026-09-26
 
 ### Fixed — `se_stream.h`, the stream now actually plays on a PC

@@ -128,6 +128,28 @@ int  scene_render_scale(void);  // the scale requested for the next frame
 //                    since the per-face normal is skipped too.
 #define SE_TRI_EMISSIVE  (1u << 0)
 
+//   SE_TRI_BLEND     HALF-TRANSPARENT: the triangle's texels are mixed
+//                    50/50 with whatever is already in the framebuffer
+//                    instead of replacing it. Textured triangles only.
+//
+//                    IT ALSO CHANGES WHEN THE TRIANGLE IS DRAWN, and
+//                    that is the part worth knowing. Blending only means
+//                    anything if what is BEHIND has already been drawn,
+//                    and the depth-order pass sorts near-to-first so the
+//                    near ones are drawn while the far ones are not yet
+//                    there. So a blended triangle is sorted AFTER every
+//                    opaque one, and far-to-near among themselves. That
+//                    is one bit in the existing sort key and costs
+//                    nothing (see order_key).
+//
+//                    It is not free per pixel: the loop has to READ the
+//                    framebuffer, which it otherwise never does. And it
+//                    costs more than that in OVERDRAW -- what is behind
+//                    now has to be drawn in full, where an opaque or
+//                    cut-out triangle would have rejected it on depth.
+//                    Use it for water, not for windows.
+#define SE_TRI_BLEND     (1u << 1)
+
 //   SE_TRI_LIGHT(n)  A light level from the GAME, 0..32 (32 = full),
 //                    multiplied into whatever shade the triangle ends up
 //                    with -- the se_light shade for a lit triangle, full
@@ -501,6 +523,7 @@ typedef struct {
     se_tvtx_t           v[3];
     se_texture_t const* tex;
     uint8_t             shade;  // light factor, 0..32 (32 = full colour)
+    uint8_t             blend;  // SE_TRI_BLEND: mix 50/50 with the framebuffer
 } se_ttri_t;
 
 typedef struct {

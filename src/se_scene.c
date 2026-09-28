@@ -889,6 +889,110 @@ static inline void scene_vrun_tex_cutout(int lx, int y_top, int y_bot, ttri_setu
     else         scene_vrun_tex_cutout_body(lx, y_top, y_bot, st, false);
 }
 
+// HALF-TRANSPARENT (SE_TRI_BLEND): the texel is mixed 50/50 with what is
+// already in the framebuffer instead of replacing it.
+//
+// THE ONE THING THIS LOOP DOES THAT NO OTHER ONE DOES IS READ THE
+// FRAMEBUFFER. Every other run is write-only on it, which is why the
+// framebuffer can sit in PSRAM and not hurt: writes are posted and the
+// loop never waits. A read is a read. It is cheaper than it looks --
+// the run walks contiguous addresses and the write has already pulled
+// the line in -- but it is the reason a blended pixel is not free.
+//
+// The mix is the standard RGB565 halving, the same one se_direct565.h
+// uses to dim a panel: mask off each channel's low bit so the shift
+// cannot bleed one channel into the next, then shift and add.
+//
+// IT IS DONE IN NATIVE BYTE ORDER, unswapping the destination first
+// when the framebuffer is stored reversed. A right shift does NOT
+// commute with a byte swap -- bit 8 crosses into the other byte -- so
+// blending in stored order would mix the green channel into the red.
+//
+// It WRITES DEPTH, and that is deliberate twice over. A nearer blended
+// surface drawn later still layers correctly, since the list is sorted
+// far-to-near. And the two triangles of a quad share an edge whose
+// pixels both of them cover: the second one finds its own depth already
+// stored, fails the strictly-greater test, and does not blend the seam
+// a second time. Without the depth write every water quad would have a
+// darker diagonal across it.
+static inline __attribute__((always_inline))
+void scene_vrun_tex_blend_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16,
+                               bool const tint) {
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  sh    = st->shade;
+    uint32_t const  shrg  = st->shade, shb = st->shade_b;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
+        if ((uint16_t)di > stored) {
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            // A hole still shows straight through, so a cut-out texture
+            // drawn blended behaves the way it always did in its holes.
+            if (t != SE_TEXEL_CUTOUT) {
+                if (d16) *zp = (uint16_t)di;
+                else     *dp = fhi | (uint16_t)di;
+                uint16_t src;
+                if (tint) {
+                    uint32_t rg = (t & 0xF800u) | ((t & 0x07E0u) << 16);
+                    rg          = ((rg * shrg) >> 5) & 0x07E0F800u;
+                    uint32_t const bb = (((t & 0x001Fu) * shb) >> 5) & 0x001Fu;
+                    src = (uint16_t)(rg | (rg >> 16) | bb);
+                } else {
+                    uint32_t x = (t | (t << 16)) & 0x07E0F81Fu;
+                    x          = ((x * sh) >> 5) & 0x07E0F81Fu;
+                    src = (uint16_t)(x | (x >> 16));
+                }
+                uint16_t dst = *fp;
+                if (rev) dst = (uint16_t)((dst >> 8) | (dst << 8));
+                uint16_t px = (uint16_t)(((src & 0xF7DEu) >> 1) + ((dst & 0xF7DEu) >> 1));
+                if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+                *fp = px;
+            }
+        }
+        fp--;
+        if (d16) zp--;
+        else     dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
+static inline void scene_vrun_tex_blend(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
+    if (lx < s_rt.vp_x0 || lx > s_rt.vp_x1) return;
+    if (y_top < s_rt.vp_y0) y_top = s_rt.vp_y0;
+    if (y_bot > s_rt.vp_y1) y_bot = s_rt.vp_y1;
+    if (y_top > y_bot) return;
+    if (s_tint_on) {
+        if (s_rt.dz_on) scene_vrun_tex_blend_body(lx, y_top, y_bot, st, true, true);
+        else            scene_vrun_tex_blend_body(lx, y_top, y_bot, st, false, true);
+        return;
+    }
+    if (s_rt.dz_on) scene_vrun_tex_blend_body(lx, y_top, y_bot, st, true, false);
+    else            scene_vrun_tex_blend_body(lx, y_top, y_bot, st, false, false);
+}
+
 static void scene_raster_ttri(se_ttri_t const* t) {
     se_tvtx_t const a = t->v[0], b = t->v[1], c = t->v[2];
     float const ex1 = b.sx - a.sx, ey1 = b.sy - a.sy;
@@ -921,6 +1025,7 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     st.shade   = (uint32_t)t->shade * s_tint_rg / 32u;
     st.shade_b = (uint32_t)t->shade * s_tint_b / 32u;
     bool const cutout = t->tex->cutout;
+    bool const blend  = t->blend != 0u;
 
     // Column scan, as in scene_raster_tri.
     float x0 = a.sx, y0 = a.sy, x1 = b.sx, y1 = b.sy, x2 = c.sx, y2 = c.sy;
@@ -950,8 +1055,9 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb = y0 + dydx_01 * dx;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
-        else        scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
+        if (blend)       scene_vrun_tex_blend(x, ceil_i(yt), floor_i(yz), &st);
+        else if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
+        else             scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
     }
     for (int x = ix_split; x < ix_endex; x++) {
         float const dx02 = (float)x - x0;
@@ -960,8 +1066,9 @@ static void scene_raster_ttri(se_ttri_t const* t) {
         float const yb   = y1 + dydx_12 * dx12;
         float yt, yz;
         if (ya < yb) { yt = ya; yz = yb; } else { yt = yb; yz = ya; }
-        if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
-        else        scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
+        if (blend)       scene_vrun_tex_blend(x, ceil_i(yt), floor_i(yz), &st);
+        else if (cutout) scene_vrun_tex_cutout(x, ceil_i(yt), floor_i(yz), &st);
+        else             scene_vrun_tex(x, ceil_i(yt), floor_i(yz), &st);
     }
 }
 
@@ -1176,7 +1283,7 @@ void scene_line(float x0, float y0, float z0,
 // original triangle's coordinates were shifted by (see below), so every
 // piece of a clipped triangle maps the texture exactly as the whole did.
 static void emit_ttri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const* c,
-                      se_texture_t const* tex, float ush, float vsh, uint8_t shade) {
+                      se_texture_t const* tex, float ush, float vsh, uint8_t shade, uint8_t blend) {
     if (s_ttri_n >= SE_SCENE_TEXTURED_TRI_CAP) {
         s_stat_ttri_drop++;
         return;  // overflow: drop, as scene_tri does
@@ -1195,6 +1302,7 @@ static void emit_ttri(clip_vtx_t const* a, clip_vtx_t const* b, clip_vtx_t const
     }
     t->tex   = tex;
     t->shade = shade;
+    t->blend = blend;
 }
 
 void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uint32_t flags) {
@@ -1239,14 +1347,16 @@ void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uin
     // The game's own light level (SE_TRI_LIGHT), multiplied in.
     if (flags & SE_TRI_LIGHT_MASK) shade = (uint8_t)((uint32_t)shade * se_tri_light_level(flags) / SE_TRI_LIGHT_MAX);
 
+    uint8_t const blend = (flags & SE_TRI_BLEND) != 0u ? 1u : 0u;
+
     if (behind == 0) {
-        emit_ttri(&c[0], &c[1], &c[2], tex, ush, vsh, shade);
+        emit_ttri(&c[0], &c[1], &c[2], tex, ush, vsh, shade, blend);
         return;
     }
     clip_vtx_t p[4];
     int const  n = clip_near(c, p);
-    emit_ttri(&p[0], &p[1], &p[2], tex, ush, vsh, shade);
-    if (n == 4) emit_ttri(&p[0], &p[2], &p[3], tex, ush, vsh, shade);
+    emit_ttri(&p[0], &p[1], &p[2], tex, ush, vsh, shade, blend);
+    if (n == 4) emit_ttri(&p[0], &p[2], &p[3], tex, ush, vsh, shade, blend);
 }
 
 // --- Points -------------------------------------------------------------------
@@ -1422,11 +1532,17 @@ static int tri_cmp_near_first(void const* pa, void const* pb) {
 static int ttri_cmp_near_first(void const* pa, void const* pb) {
     se_ttri_t const* a = (se_ttri_t const*)pa;
     se_ttri_t const* b = (se_ttri_t const*)pb;
+    // Blended last, and far-to-near among themselves: the same rule as
+    // order_key's `last`, for the fallback path that has no room for
+    // the key arrays. The two must agree or a badge short of internal
+    // SRAM would draw water differently from one that is not.
+    if (a->blend != b->blend) return a->blend ? 1 : -1;
     float const wa = a->v[0].w + a->v[1].w + a->v[2].w;
     float const wb = b->v[0].w + b->v[1].w + b->v[2].w;
-    if (wa > wb) return -1;
-    if (wa < wb) return 1;
-    return 0;
+    if (wa == wb) return 0;
+    bool const near_first = a->blend == 0u;
+    if (wa > wb) return near_first ? -1 : 1;
+    return near_first ? 1 : -1;
 }
 
 // The sort itself is a KEY sort, not a qsort of the lists: qsort moves
@@ -1477,11 +1593,29 @@ static void* order_alt_alloc(void const* list, size_t sz) {
     return heap_caps_malloc(sz, caps);
 }
 
-static inline uint32_t order_key(float wsum, int i) {
+// `last`: this primitive is HALF-TRANSPARENT (SE_TRI_BLEND) and has to
+// be drawn after every opaque one, far-to-near among themselves.
+//
+// It costs one bit and no extra pass, which is the whole reason the
+// blend could be added at all. A positive float's top 16 bits have the
+// sign bit clear, so `bits >> 16` only ever reaches 0x7FFF -- the top
+// bit of the depth half was always spare, and it now says "draw me
+// last". Opaque keys shrink from [0x8000, 0xFFFF] to [0, 0x7FFF] and
+// keep their order exactly; blended ones sit above all of them.
+//
+// And their order is INVERTED relative to the opaque ones. Opaque wants
+// near first, so an occluded pixel loses the depth test before it pays
+// for a divide and a texel fetch. Blending wants the opposite: a
+// surface has to be laid down over what is already behind it, so the
+// far one must go first or it is mixed with a framebuffer that has not
+// been painted yet.
+static inline uint32_t order_key(float wsum, int i, bool last) {
     uint32_t bits;
     memcpy(&bits, &wsum, sizeof(bits));
     if ((int32_t)bits < 0) bits = 0;   // a negative w-sum cannot happen; sort it last
-    return ((0xFFFFu - (bits >> 16)) << 16) | (uint32_t)i;
+    uint32_t const d = (bits >> 16) & 0x7FFFu;          // bigger w == nearer
+    uint32_t const k = last ? (0x8000u | d) : (0x7FFFu - d);
+    return (k << 16) | (uint32_t)i;
 }
 
 // Stable LSD radix sort of s_ok[0..n) on bits 16..31.
@@ -1513,7 +1647,7 @@ static void scene_order_pass(void) {
         if (keys && s_tris_alt != NULL) {
             for (int i = 0; i < s_tri_n; i++) {
                 scene_tri_t const* t = &s_tris[i];
-                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i);
+                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i, false);
             }
             order_radix(s_tri_n);
             for (int i = 0; i < s_tri_n; i++) s_tris_alt[i] = s_tris[s_ok[i] & 0xFFFFu];
@@ -1535,7 +1669,7 @@ static void scene_order_pass(void) {
         if (keys && s_ttris_alt != NULL) {
             for (int i = 0; i < s_ttri_n; i++) {
                 se_ttri_t const* t = &s_ttris[i];
-                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i);
+                s_ok[i] = order_key(t->v[0].w + t->v[1].w + t->v[2].w, i, t->blend != 0u);
             }
             order_radix(s_ttri_n);
             for (int i = 0; i < s_ttri_n; i++) s_ttris_alt[i] = s_ttris[s_ok[i] & 0xFFFFu];
