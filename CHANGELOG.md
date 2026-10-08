@@ -19,6 +19,48 @@ new way throughout, including entries written before the rename: the
 measurements are the same measurements, and a name nobody can look up
 helps no one. Nothing in the engine changed for it.
 
+## [2.6] — 2026-10-09
+
+### Added — `se_scene.h`, `SE_TRI_GLOW(n)`: light a game adds, past full
+
+`SE_TRI_LIGHT(n)` lets a game set a triangle's light level, but only
+downwards: its 32 is full. `SE_TRI_GLOW(n)` is the other half. It ADDS
+`n`/32 of the triangle's own colour (0..31) on top of whatever shade it
+ends up with — the light, `SE_TRI_LIGHT`, the tint — so a face can be
+brighter than full, up to nearly twice its colour, each channel
+saturating at white.
+
+Written for a game, Portals on the Tanmatsu, that wanted its energy
+pellets — glowing balls that cross a room — to light the walls round
+them. The one `se_light` cannot do that: it has no distance falloff,
+and it shades each triangle from that triangle's own centre, so a light
+near a big quad gives its two halves different shades and a seam down
+the diagonal (which is why a game's light usually sits far away, as a
+sun). A game that works out a falloff itself, per face — one value for
+both halves of a quad, subdividing near the light if it wants a pool —
+has neither problem, and could not brighten anything until now.
+
+- **Flat triangles**: the glow is folded into the colour at submit, as
+  `SE_TRI_LIGHT` is: no per-pixel cost.
+- **Opaque textured triangles**: a shade past 32 runs a sibling raster
+  loop that scales each RGB565 channel on its own and holds it at its
+  maximum (the one-multiply trick in the plain loop would carry one
+  field's overflow into the next). It is chosen per triangle, so every
+  triangle without a glow runs exactly the loops it ran before.
+- **Cut-out and blended textured triangles** light up to full and no
+  further: their loops have no room for the saturation, and nobody
+  needed a glowing window.
+
+A custom renderer reading `se_geometry_t.ttris` sees it too:
+`se_ttri_t.shade` is 0..32 as before, or up to 63 on an opaque triangle
+with a glow — to be scaled per channel and saturated, not with the
+one-multiply trick. Cut-out and blended triangles are stored at 32 at
+most.
+
+Bits 16..20 of the flags. A flags value without it — every call written
+before it — adds nothing and draws exactly as before. MINOR: an
+addition.
+
 ## [2.5] — 2026-09-29
 
 ### Added — `se_scene.h`, `SE_TRI_BLEND`: half-transparent textured triangles

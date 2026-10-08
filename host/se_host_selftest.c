@@ -50,6 +50,12 @@ int main(void) {
     se_light_t got; assert(se_light_get(&got) && got.brightness == 0.5f);
 
     assert(tris == 1 && ttris == 1 && lines == 1 && points == 1);
+    // The triangle flags: a glow and a light level travel in one flags
+    // value without touching each other, or the bits round them.
+    uint32_t const fl = SE_TRI_EMISSIVE | SE_TRI_LIGHT(20) | SE_TRI_GLOW(12);
+    assert(se_tri_light_level(fl) == 20 && se_tri_glow_level(fl) == 12 && (fl & SE_TRI_BLEND) == 0);
+    assert(se_tri_glow_level(SE_TRI_LIGHT(0)) == 0 && se_tri_light_level(SE_TRI_GLOW(31)) == SE_TRI_LIGHT_MAX);
+    assert(se_tri_glow_level(SE_TRI_GLOW(99)) == SE_TRI_GLOW_MAX && (SE_TRI_GLOW_MASK & SE_TRI_LIGHT_MASK) == 0);
     printf("host harness self-test OK (tris %d ttris %d lines %d points %d)\n", tris, ttris, lines, points);
     return 0;
 }

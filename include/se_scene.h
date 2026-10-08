@@ -172,6 +172,40 @@ static inline uint32_t se_tri_light_level(uint32_t flags) {
     return dark >= SE_TRI_LIGHT_MAX ? 0u : SE_TRI_LIGHT_MAX - dark;
 }
 
+//   SE_TRI_GLOW(n)   Light the GAME ADDS, 0..31 thirty-seconds of the
+//                    triangle's own colour, on top of whatever shade it
+//                    ends up with (se_light, SE_TRI_LIGHT, the tint): so
+//                    a face can be BRIGHTER than full, up to nearly twice
+//                    its colour, each channel saturating at white. For a
+//                    light the engine's one light cannot be: something
+//                    that glows lighting the walls round it, with the
+//                    falloff the game works out per face -- a plasma
+//                    ball crossing a room, a lamp, a torch.
+//
+//                    SE_TRI_LIGHT can only darken (its 32 is full), and
+//                    se_light has no falloff and shades each triangle
+//                    from its own centre, so a light near a big quad
+//                    splits it down the diagonal. A game that computes
+//                    its own per-face level -- one value for both halves
+//                    of a quad -- has neither problem, and this is the
+//                    half of that it could not do before.
+//
+//                    Opaque textured and flat triangles brighten. A
+//                    cut-out or blended one lights only up to full: its
+//                    raster loops have no room for the saturation, and a
+//                    glowing window was not worth slowing them for.
+//                    Carried in bits 16..20; 0 -- every call written
+//                    before it existed -- adds nothing. (Since 2.6.)
+#define SE_TRI_GLOW_MAX   31u
+#define SE_TRI_GLOW_SHIFT 16
+#define SE_TRI_GLOW_MASK  (31u << SE_TRI_GLOW_SHIFT)
+#define SE_TRI_GLOW(n) \
+    (((uint32_t)(n) > SE_TRI_GLOW_MAX ? SE_TRI_GLOW_MAX : (uint32_t)(n)) << SE_TRI_GLOW_SHIFT)
+// The glow a flags value carries, 0..SE_TRI_GLOW_MAX.
+static inline uint32_t se_tri_glow_level(uint32_t flags) {
+    return (flags & SE_TRI_GLOW_MASK) >> SE_TRI_GLOW_SHIFT;
+}
+
 // --- Tinting everything drawn ----------------------------------------
 //
 // Scale the RED AND GREEN of every triangle by `rg` and the BLUE by `b`,
@@ -522,7 +556,12 @@ typedef struct {
 typedef struct {
     se_tvtx_t           v[3];
     se_texture_t const* tex;
-    uint8_t             shade;  // light factor, 0..32 (32 = full colour)
+    // Light factor, 0..32 (32 = full colour) -- or past it, to 63, on an
+    // opaque triangle with SE_TRI_GLOW: brighter than full. A custom
+    // textured pass must then scale each RGB565 channel on its own and
+    // saturate it (the one-multiply trick overflows one field into the
+    // next). Cut-out and blended triangles are stored at 32 at most.
+    uint8_t             shade;
     uint8_t             blend;  // SE_TRI_BLEND: mix 50/50 with the framebuffer
 } se_ttri_t;
 
