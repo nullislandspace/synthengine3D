@@ -630,8 +630,8 @@ typedef struct {
     uint16_t const* texels;
     uint32_t        wmask, hmask;
     uint32_t        wlog2;
-    uint32_t        shade;        // 0..32, red and green
-    uint32_t        shade_b;      // 0..32, blue -- differs only while a tint is set
+    uint32_t        shade;        // 0..32, red and green (to 63 with SE_TRI_GLOW)
+    uint32_t        shade_b;      // 0..32, blue (to 63 with SE_TRI_GLOW) -- differs only while a tint is set
 } ttri_setup_t;
 
 // The scene tint (se_scene.h). 32/32 is "no tint", and then the plain
@@ -861,11 +861,71 @@ void scene_vrun_tex_cutout_tint_body(int lx, int y_top, int y_bot, ttri_setup_t 
     }
 }
 
+// The same run, BRIGHTER THAN FULL (SE_TRI_GLOW): a shade past 32 would
+// carry one field's overflow into the next in the one-multiply trick
+// above, so each channel is scaled on its own and held at its maximum.
+// A sibling again, chosen per triangle: only a glowing one runs it.
+static inline __attribute__((always_inline))
+void scene_vrun_tex_bright_body(int lx, int y_top, int y_bot, ttri_setup_t const* st, bool const d16) {
+    uint16_t const  frame = s_frame;
+    uint32_t const  fhi   = (uint32_t)frame << 16;
+    int const       idx   = rt_index(lx, y_top);
+    uint16_t*       fp    = s_rt.fb + idx;
+    uint32_t*       dp    = s_rt.ds + idx;
+    uint16_t*       zp    = s_rt.dz + idx;
+    float const     fx    = (float)lx, fy = (float)y_top;
+    float           d     = st->Ad * fx + st->Bd * fy + st->Cd;
+    float           us    = st->Au * fx + st->Bu * fy + st->Cu;
+    float           vs    = st->Av * fx + st->Bv * fy + st->Cv;
+    float const     Bd = st->Bd, Bu = st->Bu, Bv = st->Bv;
+    uint16_t const* tx    = st->texels;
+    uint32_t const  wm = st->wmask, hm = st->hmask, wl = st->wlog2;
+    uint32_t const  shrg  = st->shade, shb = st->shade_b;
+    bool const      rev   = s_rev;
+    int             cnt   = y_bot - y_top + 1;
+    s_rt.ttri_px += cnt;
+    s_rt.ttri_sp++;
+    while (cnt-- > 0) {
+        int di = (int)d;
+        if (di < 0) di = 0;
+        uint16_t const stored =
+            d16 ? *zp : ((uint16_t)(*dp >> 16) == frame) ? (uint16_t)*dp : 0;
+        if ((uint16_t)di > stored) {
+            if (d16) *zp = (uint16_t)di;
+            else     *dp = fhi | (uint16_t)di;
+            float const    inv = 1.0f / d;
+            uint32_t const tu  = (uint32_t)(int)(us * inv) & wm;
+            uint32_t const tv  = (uint32_t)(int)(vs * inv) & hm;
+            uint32_t const t   = tx[(tv << wl) | tu];
+            uint32_t       r   = ((t >> 11) * shrg) >> 5;
+            uint32_t       g   = (((t >> 5) & 0x3Fu) * shrg) >> 5;
+            uint32_t       b   = ((t & 0x1Fu) * shb) >> 5;
+            if (r > 0x1Fu) r = 0x1Fu;
+            if (g > 0x3Fu) g = 0x3Fu;
+            if (b > 0x1Fu) b = 0x1Fu;
+            uint16_t px = (uint16_t)((r << 11) | (g << 5) | b);
+            if (rev) px = (uint16_t)((px >> 8) | (px << 8));
+            *fp = px;
+        }
+        fp--;
+        if (d16) zp--;
+        else     dp--;
+        d  += Bd;
+        us += Bu;
+        vs += Bv;
+    }
+}
+
 static inline void scene_vrun_tex(int lx, int y_top, int y_bot, ttri_setup_t const* st) {
     if (lx < s_rt.vp_x0 || lx > s_rt.vp_x1) return;
     if (y_top < s_rt.vp_y0) y_top = s_rt.vp_y0;
     if (y_bot > s_rt.vp_y1) y_bot = s_rt.vp_y1;
     if (y_top > y_bot) return;
+    if (st->shade > 32u || st->shade_b > 32u) {
+        if (s_rt.dz_on) scene_vrun_tex_bright_body(lx, y_top, y_bot, st, true);
+        else         scene_vrun_tex_bright_body(lx, y_top, y_bot, st, false);
+        return;
+    }
     if (s_tint_on) {
         if (s_rt.dz_on) scene_vrun_tex_tint_body(lx, y_top, y_bot, st, true);
         else         scene_vrun_tex_tint_body(lx, y_top, y_bot, st, false);
@@ -1026,6 +1086,12 @@ static void scene_raster_ttri(se_ttri_t const* t) {
     st.shade_b = (uint32_t)t->shade * s_tint_b / 32u;
     bool const cutout = t->tex->cutout;
     bool const blend  = t->blend != 0u;
+    // Brighter than full (SE_TRI_GLOW) only on an opaque triangle: the
+    // cut-out and blended loops scale without saturating, so they stop at 32.
+    if (cutout || blend) {
+        if (st.shade > 32u) st.shade = 32u;
+        if (st.shade_b > 32u) st.shade_b = 32u;
+    }
 
     // Column scan, as in scene_raster_tri.
     float x0 = a.sx, y0 = a.sy, x1 = b.sx, y1 = b.sy, x2 = c.sx, y2 = c.sy;
@@ -1218,6 +1284,7 @@ void scene_tri(float x0, float y0, float z0,
     // to it below: the pieces of a clipped face share its normal. Off by
     // default, and then this is a load and a branch. An emissive triangle
     // skips it and keeps the colour it was given.
+    uint32_t const argb0 = argb;  // the colour as given: what a glow adds to
     if (se_light_is_on && !(flags & SE_TRI_EMISSIVE)) {
         argb = se_light_shade_tri(argb, x0, y0, z0, x1, y1, z1, x2, y2, z2,
                                   s_camera.x, s_camera.y, s_camera.z);
@@ -1237,6 +1304,18 @@ void scene_tri(float x0, float y0, float z0,
         uint32_t const g  = ((argb >> 8) & 0xFFu) * lv / SE_TRI_LIGHT_MAX;
         uint32_t const b  = (argb & 0xFFu) * lv / SE_TRI_LIGHT_MAX;
         argb              = (argb & 0xFF000000u) | (r << 16) | (g << 8) | b;
+    }
+    // The game's glow (SE_TRI_GLOW): so many thirty-seconds of the colour
+    // as given, tinted, ADDED -- each channel saturating at 255.
+    if (flags & SE_TRI_GLOW_MASK) {
+        uint32_t const gl = se_tri_glow_level(flags);
+        uint32_t       r  = ((argb >> 16) & 0xFFu) + ((argb0 >> 16) & 0xFFu) * gl * s_tint_rg / (32u * 32u);
+        uint32_t       g  = ((argb >> 8) & 0xFFu) + ((argb0 >> 8) & 0xFFu) * gl * s_tint_rg / (32u * 32u);
+        uint32_t       b  = (argb & 0xFFu) + (argb0 & 0xFFu) * gl * s_tint_b / (32u * 32u);
+        if (r > 255u) r = 255u;
+        if (g > 255u) g = 255u;
+        if (b > 255u) b = 255u;
+        argb = (argb & 0xFF000000u) | (r << 16) | (g << 8) | b;
     }
     uint16_t const packed = direct_565_pack(argb, s_rev);
 
@@ -1346,6 +1425,12 @@ void scene_textured_tri(se_tex_vertex_t const v[3], se_texture_t const* tex, uin
     }
     // The game's own light level (SE_TRI_LIGHT), multiplied in.
     if (flags & SE_TRI_LIGHT_MASK) shade = (uint8_t)((uint32_t)shade * se_tri_light_level(flags) / SE_TRI_LIGHT_MAX);
+    // The game's glow (SE_TRI_GLOW), added: the shade may now pass 32, and
+    // the raster picks a loop that saturates (scene_vrun_tex_bright_body).
+    shade = (uint8_t)(shade + se_tri_glow_level(flags));
+    // ... but not on a cut-out or blended triangle, which is drawn at full
+    // at most: stored so, as the public se_ttri_t promises.
+    if (shade > 32u && ((flags & SE_TRI_BLEND) || tex->cutout)) shade = 32u;
 
     uint8_t const blend = (flags & SE_TRI_BLEND) != 0u ? 1u : 0u;
 

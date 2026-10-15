@@ -357,7 +357,8 @@ what a second core would need.
 - **Also:** a clipping viewport, quarter-resolution rendering and pluggable
   renderers (sections below).
 - **Doesn't (yet / by design):** texture filtering or mipmaps, blended (partial) transparency,
-  per-vertex colour, more than one light, shadows, distance falloff, specular,
+  per-vertex colour, more than one light, shadows, distance falloff (the game's
+  own, per face: `SE_TRI_GLOW`, below), specular,
   back-face culling (game-side, by design). **The game owns its object/world model** — the engine never sees
   "objects", only triangles and edges (see [objects.md](objects.md)).
 
@@ -396,6 +397,25 @@ game still owns **back-face culling**, so a lit game computes the face normal
 once for its own cull and the engine computes it again for the shade; at a few
 hundred triangles a frame that duplication is far cheaper than an API that
 makes the game hand its normals over.
+
+### A game's own light: `SE_TRI_LIGHT` and `SE_TRI_GLOW`
+
+`se_light` has no distance falloff, and it shades each triangle from that
+triangle's own centre: a light close to a big quad gives the quad's two
+halves different shades, and a seam shows down the diagonal. A light
+that is local — a lamp, a torch, something glowing crossing a room — is
+the game's to work out, per face, with whatever falloff it likes, and to
+hand over in the flags:
+
+- `SE_TRI_LIGHT(n)`, 0..32, multiplies the shade: darker, down to black.
+- `SE_TRI_GLOW(n)`, 0..31, adds `n`/32 of the triangle's colour on top:
+  brighter, up to nearly twice the colour, saturating at white. Opaque
+  textured and flat triangles only; a cut-out or blended one stops at
+  full. (Since 2.6.)
+
+One value for both triangles of a quad keeps the quad whole; a game that
+wants a pool of light rather than a lit wall cuts the quads near the
+light smaller and gives each its own value.
 
 ## Textured triangles (`se_texture.h`, `scene_textured_tri`)
 
@@ -438,7 +458,9 @@ scene_textured_tri(v, metal, 0);
   flat one. A custom renderer sees them in
   `se_geometry_t.ttris` and can call `se_scene_raster_textured()`.
 - **Lighting** applies as it does to flat triangles: the same per-face shade,
-  computed at submit time, kept as a 0..32 factor and applied to each texel.
+  computed at submit time, kept as a 0..32 factor and applied to each texel --
+  up to 63 on an opaque triangle with `SE_TRI_GLOW`, brighter than full, which
+  a custom textured pass has to scale per channel and saturate.
   `SE_TRI_EMISSIVE` skips it, and the texels are drawn as loaded.
 - **Cost.** The divide and the texel fetch only happen for pixels that pass the
   depth test, but that is still far more work per pixel than a flat fill.
