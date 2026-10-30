@@ -85,7 +85,34 @@ typedef struct {
 // an error, the console is still there and nothing has been taken away.
 esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb);
 
-// Stop, free everything, and give the USB-C port back to the console.
+// Take the H.264 encoder's memory early and hold it for the whole run,
+// without starting a stream. Call it once, at boot, before the game has
+// filled internal SRAM with anything of its own -- and know that it costs
+// 57.6 KiB of internal SRAM for the rest of the run.
+//
+// WHY IT EXISTS. The encoder's reference frame is the one allocation on this
+// badge that internal SRAM alone can satisfy: esp_h264_enc_hw_new() asks for
+// 57 607 contiguous bytes with ESP_H264_MEM_INTERNAL and never tries PSRAM
+// (esp_h264_enc_hw_param.c:382). Asked for at boot it lands. Asked for after
+// a texture cache of 191 separate allocations has been laid over the same
+// heap, it does not -- 133 KiB free and 38 KiB in one piece is enough in
+// total and not enough in a row. Everything else the encoder owns, its 576
+// KiB de-blocking buffer included, already falls back to PSRAM.
+//
+// OPTIONAL. Without it nothing changes: se_stream_start() builds the encoder
+// on demand and se_stream_stop() deletes it again, buffers and all, exactly
+// as it did before this call existed. Calling it early is what makes the
+// difference between a livestream that starts and one that quietly never
+// does; calling it is also the only way the memory is NOT handed back when a
+// stream stops.
+//
+// Returns ESP_FAIL when the encoder would not allocate -- and there is a
+// console to say so on, which there is not once a stream is up.
+esp_err_t se_stream_reserve_permanent_memory(void);
+
+// Stop, give the USB-C port back to the console, and free everything -- the
+// encoder included, unless se_stream_reserve_permanent_memory() was called,
+// in which case its buffers are kept for the next stream.
 void se_stream_stop(void);
 
 bool se_stream_running(void);

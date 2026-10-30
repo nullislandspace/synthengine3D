@@ -73,6 +73,10 @@ static uint8_t*              s_yuv[NYUV];
 static uint8_t*              s_bs;
 static ppa_client_handle_t   s_ppa;
 static esp_h264_enc_handle_t s_enc;
+// Set only by se_stream_reserve_permanent_memory(). It says who the encoder
+// belongs to: an app that reserved it up front keeps it for the whole run,
+// an app that never did gets the buffers back when the stream stops.
+static bool                    s_enc_kept;
 static tsmux_t               s_mux;
 static volatile bool         s_run;
 static volatile bool         s_done;
@@ -485,10 +489,17 @@ static void stream_task(void* arg) {
 static void free_all(void) {
     heap_caps_free(s_hist);
     s_hist = NULL;
+    // enc_close() frees no buffers -- only the interrupt and the DMA link --
+    // and enc_del() is what gives the reference frame back. An app that
+    // reserved the encoder up front wants that block to outlive the stream;
+    // one that never asked gets exactly what it always got, every buffer
+    // handed back to the heap.
     if (s_enc) {
         esp_h264_enc_close(s_enc);
-        esp_h264_enc_del(s_enc);
-        s_enc = NULL;
+        if (!s_enc_kept) {
+            esp_h264_enc_del(s_enc);
+            s_enc = NULL;
+        }
     }
     if (s_ppa) {
         ppa_unregister_client(s_ppa);
@@ -501,6 +512,74 @@ static void free_all(void) {
     heap_caps_free(s_bs);
     s_bs = NULL;
     se_stream_audio_free();
+}
+
+// THE ENCODER IS BUILT ONCE AND KEPT FOR THE WHOLE RUN.
+//
+// esp_h264_enc_hw_new() asks for the encoder's reference frame as ONE
+// contiguous block of internal SRAM -- 3 macroblock lines x 16 x (16 luma +
+// 8 chroma) texels per macroblock column, plus the alignment slack -- and it
+// asks with ESP_H264_MEM_INTERNAL, with no second attempt in PSRAM
+// (esp_h264_enc_hw_param.c:382). At 800x480 that is 57 607 bytes. Every other
+// large buffer the component owns falls back to PSRAM, the 576 KiB de-blocking
+// buffer among them, so this one allocation is the whole problem: the largest
+// contiguous ask on this badge, made in an internal heap a texture cache of
+// 191 separate allocations has already cut into pieces.
+//
+// Building it at boot, before the game has allocated anything there, is what
+// makes the room exist. Nothing has to be borrowed from anything else: the
+// texture loader already falls back to PSRAM when internal SRAM will not take
+// it (se_texture_load), so it simply finds less room and takes that fallback.
+// Building it on demand -- which is what this used to do -- has the encoder
+// asking last, for the biggest single block, in the heap at its most
+// fragmented. That is the failure this replaces: 133 KiB free, 38 KiB in one
+// piece, and "No memory for reference frame".
+//
+// THE ORDERING DECIDES ONE MORE BUFFER, AND WANTS IT THE OTHER WAY ROUND.
+// The 576 KiB de-blocking buffer PREFERS internal SRAM and falls back to
+// PSRAM. Asking for it while the game's own internal allocations are up, with
+// no single block that large left, is what keeps it out of there.
+static esp_err_t prepare_encoder(void) {
+    if (s_enc) return ESP_OK;
+
+    // Said before it asks, because the component only ever says "No memory
+    // for reference frame" and never what was available (F-106). The number
+    // that decides the outcome is the largest free block, not the free total.
+    size_t const mb_col   = ((size_t)OUT_W + 15u) / 16u;
+    size_t const ref_need = 3u * 16u * 24u * mb_col + 7u;
+    ESP_LOGI(TAG, "encoder: internal heap %u B free, %u B in one piece; the reference frame wants %u B contiguous",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)ref_need);
+
+    // A placeholder rate. se_stream_start() sets fps, gop and bitrate on the
+    // live handle, so a game that wants 20 fps gets 20 fps out of an encoder
+    // built at 30.
+    esp_h264_enc_cfg_hw_t const ecfg = {
+        .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
+        .gop      = 30,
+        .fps      = 30,
+        .res      = {.width = OUT_W, .height = OUT_H},
+        .rc       = {.bitrate = 3000u * 1000u, .qp_min = 16, .qp_max = 40},
+    };
+    if (esp_h264_enc_hw_new(&ecfg, &s_enc) != ESP_H264_ERR_OK || s_enc == NULL) {
+        s_enc = NULL;
+        ESP_LOGE(TAG, "no encoder: the reference frame would not allocate. livestream is unavailable");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "encoder: built. internal heap now %u B free, %u B in one piece",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return ESP_OK;
+}
+
+esp_err_t se_stream_reserve_permanent_memory(void) {
+    if (prepare_encoder() != ESP_OK) return ESP_FAIL;
+    if (!s_enc_kept) {
+        s_enc_kept = true;
+        ESP_LOGI(TAG, "encoder: held for the whole run. se_stream_stop() will not give its internal SRAM back");
+    }
+    return ESP_OK;
 }
 
 esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
@@ -540,16 +619,23 @@ esp_err_t se_stream_start(se_stream_cfg_t const* cfg, pax_buf_t const* fb) {
         free_all();
         return ESP_FAIL;
     }
-    esp_h264_enc_cfg_hw_t const ecfg = {
-        .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
-        .gop      = (uint8_t)s_cfg.gop,
-        .fps      = (uint8_t)s_cfg.fps_hint,
-        .res      = {.width = OUT_W, .height = OUT_H},
-        .rc       = {.bitrate = s_cfg.bitrate_kbit * 1000u, .qp_min = 16, .qp_max = 40},
-    };
-    if (esp_h264_enc_hw_new(&ecfg, &s_enc) != ESP_H264_ERR_OK || s_enc == NULL ||
-        esp_h264_enc_open(s_enc) != ESP_H264_ERR_OK) {
+    // THE ENCODER, OR THE REASON THERE IS NOT ONE. A game that never called
+    // se_stream_reserve_permanent_memory() gets what it always got: built
+    // here, on demand, and deleted again by se_stream_stop().
+    if (prepare_encoder() != ESP_OK) {
         free_all();
+        return ESP_FAIL;
+    }
+    // THE RATE IS THE GAME'S, NOT THE ONE THE ENCODER WAS BUILT WITH.
+    esp_h264_enc_param_hw_handle_t ph = NULL;
+    if (esp_h264_enc_hw_get_param_hd(s_enc, &ph) == ESP_H264_ERR_OK && ph) {
+        esp_h264_enc_set_fps(&ph->base, (uint8_t)s_cfg.fps_hint);
+        esp_h264_enc_set_gop(&ph->base, (uint8_t)s_cfg.gop);
+        esp_h264_enc_set_bitrate(&ph->base, s_cfg.bitrate_kbit * 1000u);
+    }
+    if (esp_h264_enc_open(s_enc) != ESP_H264_ERR_OK) {
+        free_all();
+        ESP_LOGE(TAG, "stream refused: the H.264 encoder would not open");
         return ESP_FAIL;
     }
     // AUDIO LAST OF THE ALLOCATORS, AND AFTER THE ENCODER ON PURPOSE.

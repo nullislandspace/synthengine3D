@@ -1,3 +1,37 @@
+## [2.7] — 2026-10-31
+
+### Added — `se_stream.h`, `se_stream_reserve_permanent_memory()`: take the
+encoder's internal SRAM before the game fills it
+
+```c
+esp_err_t se_stream_reserve_permanent_memory(void);
+```
+
+The hardware H.264 encoder's reference frame is the one allocation on the
+tanmatsu that internal SRAM alone can satisfy. `esp_h264_enc_hw_new()` asks
+for it as 3 macroblock lines x 16 x (16 luma + 8 chroma) texels per
+macroblock column -- 57 607 contiguous bytes at 800x480 -- through
+`esp_h264_aligned_malloc(..., ESP_H264_MEM_INTERNAL)` with no second attempt
+in PSRAM (`esp_h264_enc_hw_param.c:382`). Every other large buffer the
+component owns, its 576 KiB de-blocking buffer included, falls back to PSRAM.
+
+Asked for at boot, that block lands. Asked for from `se_stream_start()`, after
+a game's texture cache has laid 191 separate allocations over the same heap,
+it does not: SynthMiner measured 133 KiB free and 38 KiB in one piece, and
+the component's entire report was "No memory for reference frame".
+
+`se_stream_reserve_permanent_memory()` takes the block early and holds it.
+Everything allocated afterwards simply finds less internal room and takes
+whatever fallback it already had. `se_stream_stop()` then closes the encoder
+without deleting it, so the block survives a stream being switched off and on.
+
+**Optional, and the old behaviour without it.** `se_stream_start()` builds the
+encoder on demand when nothing was reserved, and `se_stream_stop()` deletes it
+again, buffers and all, exactly as before; only the ordering of the allocation
+changes. `fps`, `gop` and bitrate are still taken from the game's
+`se_stream_cfg_t` at start and applied to the live handle, so an encoder built
+at 30 fps streams at 20 if that is what the game asked for.
+
 # Changelog
 
 All notable changes to SynthEngine3D's **public API** (everything under
